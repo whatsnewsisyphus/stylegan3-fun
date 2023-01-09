@@ -243,9 +243,9 @@ def slerp(
     v1 = v1 / np.linalg.norm(v1)
     # Dot product with the normalized vectors (can't always use np.dot, so we use the definition)
     dot = np.sum(v0 * v1)
-    # If it's ~1, vectors are ~colineal, so use lerp
+    # If it's ~1, vectors are ~colineal, so use lerp on the original vectors
     if np.abs(dot) > dot_threshold:
-        return lerp(t, v0, v1)
+        return lerp(t, v0_copy, v1_copy)
     # Stay within domain of arccos
     dot = np.clip(dot, -1.0, 1.0)
     # Calculate initial angle between v0 and v1
