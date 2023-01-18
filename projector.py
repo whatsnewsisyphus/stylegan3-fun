@@ -422,11 +422,6 @@ def run_projection(
         if projection_seed is None:
             ctx.fail('Provide a seed to start from if not starting from the midpoint. Use "--projection-seed" to do so')
 
-    # Other losses are still broken, sorry!
-    if loss_paper != 'sgan2':
-        print("All losses other than the o.g. StyleGAN2 is still in experimental phase. Sorry!")
-        loss_paper = 'sgan2'
-
     # Load networks.
     # If model name exists in the gen_utils.resume_specs dictionary, use it instead of the full url
     try:

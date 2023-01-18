@@ -437,6 +437,7 @@ resume_specs = {
             'maps1024':      'https://archive.org/download/mapdreamer/mapdreamer.pkl',  # Thanks to @tjukanov
             'fursona512':    'https://thisfursonadoesnotexist.com/model/network-e621-r-512-3194880.pkl',  # Thanks to @arfafax
             'mlpony512':     'https://thisponydoesnotexist.net/model/network-ponies-1024-151552.pkl',  # Thanks to @arfafax
+            'lhq1024':       'https://huggingface.co/justinpinkney/lhq-sg2-1024/resolve/main/lhq-sg2-1024.pkl',  # Thanks to @justinpinkney
             # Deceive-D/APA models (ignoring the faces models): https://github.com/EndlessSora/DeceiveD
             'afhqcat256':    'https://drive.google.com/u/0/uc?export=download&confirm=zFoN&id=1P9ouHIK-W8JTb6bvecfBe4c_3w6gmMJK',
             'anime256':      'https://drive.google.com/u/0/uc?export=download&confirm=6Uie&id=1EWOdieqELYmd2xRxUR4gnx7G10YI5dyP',
