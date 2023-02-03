@@ -153,6 +153,45 @@ def parse_new_center(s: str) -> Tuple[str, Union[int, Tuple[np.ndarray, Optional
         return s, new_center
 
 
+def parse_all_projected_dlatents(s: str) -> List[torch.Tensor]:
+    """Get all the dlatents (.npy/.npz files) in a given directory"""
+    # Get all the files in the directory and subdirectories
+    files = [os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(s)) for f in fn]
+    # Filter only the .npy or .npz files
+    files = [f for f in files if f.endswith('.npy') or f.endswith('.npz')]
+    # Sort them by name, but only according to the last digits in the name (in case there's an error before)
+    files = sorted(files, key=lambda x: int(''.join(filter(str.isdigit, x))))
+    # Get the full path
+    # files = [os.path.join(s, f) for f in files]
+    # Get the dlatents
+    dlatents = [get_latent_from_file(f, return_ext=False) for f in files]
+
+    return dlatents
+
+# get all the .png files in a given directory and subdirectories sorted by name
+# s='./out/projection_aifilmfestival/frame5_ethereal/'
+# files = [os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(s)) for f in fn]
+# # Remove those that don't have 'final' in the name
+# files = [f for f in files if 'final' in f]
+# files = sorted(files, key=lambda x: int(''.join(filter(str.isdigit, x))))
+# # Remove non image files
+# files = [f for f in files if f.endswith('.jpg')]
+# # Define a function mesh_images to join all images in files, with number of rows, columns, and size of each image
+# def mesh_images(files, rows, cols, size):
+#     mesh = Image.new('RGB', (cols * size, rows * size))
+#     for idx, f in enumerate(files):
+#         img = Image.open(f)
+#         img = img.resize((size, size), Image.ANTIALIAS)
+#         mesh.paste(img, (size * (idx % cols), size * (int(idx / cols))))
+#     return mesh
+#
+# # Mesh all images in files into a grid of 15 columns by 9 rows with Pillow or numpy
+# grid = mesh_images(files, 9, 15, 256)
+#
+# # Save meshed image in the s directory
+# grid.save(os.path.join(s, 'final_projection_meshed.jpg'))
+
+
 def load_network(name: str, network_pkl: Union[str, os.PathLike], cfg: Optional[str], device: torch.device):
     """Load and return the discriminator D from a trained network."""
     # Define the model
@@ -322,6 +361,88 @@ def double_slowdown(latents: np.ndarray, duration: float, frames: int) -> Tuple[
     return z, 2 * duration, 2 * frames
 
 
+def global_pulsate_psi(psi_start: float, psi_end: float, n_steps: int, frequency: float = 1.0) -> torch.Tensor:
+    """
+    Pulsate the truncation psi parameter between start and end, taking n_steps on a sinusoidal wave.
+    """
+    alpha = (psi_start + psi_end) / (psi_start - psi_end)
+    beta = 2 / (psi_start - psi_end)
+
+    total_time = 2 * np.pi  # This value doesn't matter in the end
+
+    timesteps = torch.arange(0, total_time, total_time / n_steps)
+    truncation_psi = (torch.cos(frequency * timesteps) + alpha) / beta
+
+    return truncation_psi
+
+
+def wave_pulse_truncation_psi(psi_start: float,
+                              psi_end: float,
+                              n_steps: int,
+                              grid_shape: Tuple[int, int],
+                              frequency: int,
+                              time: int) -> torch.Tensor:  # Output shape: [num_grids, 1, 1]
+    """
+    Pulsate the truncation psi parameter between start and end, taking n_steps on a sinusoidal wave on a grid
+    """
+    # Let's save some headaches, shall we?
+    if psi_start == psi_end:
+        import math
+        return torch.ones(math.prod(grid_shape), 1, 1) * psi_start
+    # The rest is assuming they're different
+    alpha = (psi_start + psi_end) / (psi_start - psi_end)
+    beta = 2 / (psi_start - psi_end)
+
+
+    total_time = 5 * torch.pi  # T
+    delta = torch.pi
+    timesteps = torch.arange(0, total_time, total_time / n_steps)
+
+    # Envolope function
+    def envelope(time):
+        """Envelope function: if time > delta or <= total_time / 2, reutnr a*t + b; if time > total_time / 2 and time <= total_time - delta, return c*t + d"""
+        # a = (psi_start - psi_end) / (delta - total_time)
+        # b = psi_end - a * delta
+        # c = - a
+        # d = psi_end - c * total_time / 2
+        #
+        # return torch.where(torch.gt(time, delta) & torch.lt(time, total_time / 2),
+        #                    a * time + b,
+        #                    torch.where(torch.gt(time, total_time / 2) & torch.lt(time, total_time - delta),
+        #                                c * time + d,
+        #                                torch.tensor(psi_start))) / psi_start
+        """ Envelope function that is a 1d Gabor filter """
+        # gaussian = torch.exp(-(time - total_time / 2) ** 2 / 16)
+        # sinusoid = torch.exp(1j * torch.pi(time - total_time / 2) / 2)
+        # return torch.sin(time * torch.pi / total_time) / 2 + 0.5
+        return torch.tensor(1.0)
+
+    width, height = grid_shape
+
+    xs = torch.arange(0, 2*torch.pi, 2*torch.pi/width)
+    ys = torch.arange(0, 2*torch.pi, 2*torch.pi/height)
+    x, y = torch.meshgrid(xs, ys, indexing='xy')
+
+    # Define the wave equation (go crazy)
+    r = torch.sqrt(x ** 2 + y ** 2)
+    # alpha = psi_start / (psi_start - psi_end)
+    # beta = 1 / (psi_start - psi_end)
+    # gaussian = torch.exp(-torch.pow(r - timesteps[time] - total_time / 2, 2)) / 8
+    # sinusoid = torch.exp(1j * 2 * torch.pi * (r - timesteps[time] - total_time / 2) / 2)
+    # ps = (alpha - torch.pow(gaussian * torch.real(sinusoid), 2)) / beta
+
+    def psi(alpha):
+        return psi_start + alpha * (psi_end - psi_start)
+
+    truncation_psi = torch.where(torch.gt(r, timesteps[time]) | torch.lt(r, timesteps[time] - 2 * torch.pi),
+                                 torch.tensor(psi_start),
+                                 psi(torch.sin(r / (8**0.5)) * (torch.cos(frequency * (r - timesteps[time])))**2))
+                                 # (torch.cos(frequency * (r - timesteps[time])) + alpha) / beta)
+
+    truncation_psi = truncation_psi.view(width*height, 1, 1)
+    return truncation_psi
+
+
 # ----------------------------------------------------------------------------
 
 
@@ -486,15 +607,24 @@ resume_specs = {
 
 
 # TODO: all of the following functions must work for RGBA images
-def w_to_img(G, dlatents: Union[List[torch.Tensor], torch.Tensor], noise_mode: str = 'const') -> np.ndarray:
+def w_to_img(G, dlatents: Union[List[torch.Tensor], torch.Tensor],
+             noise_mode: str = 'const',
+             new_w_avg: torch.Tensor = None,
+             truncation_psi: float = 1.0) -> np.ndarray:
     """
     Get an image/np.ndarray from a dlatent W using G and the selected noise_mode. The final shape of the
     returned image will be [len(dlatents), G.img_resolution, G.img_resolution, G.img_channels].
         Note: this function should be used after doing the truncation trick!
+        Note: Optionally, you can also pass a new_w_avg to use instead of the one in G, with a reverse
+              truncation trick
     """
+    # If we have a single dlatent, we need to add a batch dimension
     assert isinstance(dlatents, torch.Tensor), f'dlatents should be a torch.Tensor!: "{type(dlatents)}"'
     if len(dlatents.shape) == 2:
         dlatents = dlatents.unsqueeze(0)  # An individual dlatent => [1, G.mapping.num_ws, G.mapping.w_dim]
+    if new_w_avg is not None:
+        new_w_avg = new_w_avg.to(next(G.parameters()).device)
+        dlatents = (dlatents - new_w_avg) * (1 - truncation_psi) + new_w_avg
     synth_image = G.synthesis(dlatents, noise_mode=noise_mode)
     synth_image = (synth_image + 1) * 255/2  # [-1.0, 1.0] -> [0.0, 255.0]
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8).cpu().numpy()  # NCWH => NWHC
@@ -523,11 +653,11 @@ def z_to_img(G, latents: torch.Tensor, label: torch.Tensor, truncation_psi: floa
     return img
 
 
-def get_w_from_seed(G, device: torch.device, seed: int, truncation_psi: float) -> torch.Tensor:
+def get_w_from_seed(G, device: torch.device, seed: int, truncation_psi: float, new_w_avg: torch.Tensor = None) -> torch.Tensor:
     """Get the dlatent from a random seed, using the truncation trick (this could be optional)"""
     z = np.random.RandomState(seed).randn(1, G.z_dim)
     w = G.mapping(torch.from_numpy(z).to(device), None)
-    w_avg = G.mapping.w_avg
+    w_avg = G.mapping.w_avg if new_w_avg is None else new_w_avg.to(device)
     w = w_avg + (w - w_avg) * truncation_psi
 
     return w

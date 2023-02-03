@@ -243,7 +243,7 @@ def generate_images(
     # Save the configuration used
     ctx.obj = {
         'network_pkl': network_pkl,
-        'device': device,
+        'device': device.type,
         'config': cfg,
         'synthesis': {
             'seeds': seeds,
@@ -560,7 +560,13 @@ def random_interpolation_video(
 # Synthesis options
 @click.option('--seed', type=int, help='Random seed', required=True)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
-@click.option('--new-center', type=gen_utils.parse_new_center, help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
+@click.option('--trunc-start', 'truncation_psi_start', type=float, help='Initial value of pulsating truncation psi', default=None, show_default=True)
+@click.option('--trunc-end', 'truncation_psi_end', type=float, help='Maximum/minimum value of pulsating truncation psi', default=None, show_default=True)
+@click.option('--global-pulse', 'global_pulsation_trick', is_flag=True, help='If set, the truncation psi will pulsate globally (on all grid cells)')
+@click.option('--wave-pulse', 'wave_pulsation_trick', is_flag=True, help='If set, the truncation psi will pulsate in a wave-like fashion from the upper left to the lower right in the grid')
+@click.option('--frequency', 'pulsation_frequency', type=int, help='Frequency of the pulsation', default=1, show_default=True)
+@click.option('--new-center', type=str, help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
+@click.option('--new-w-avg', 'new_w_avg', type=gen_utils.parse_new_center, help='Path to a new "global" w_avg (seed or .npy/.npz file) to be used in the truncation trick', default=None)
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)')
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--anchor-latent-space', '-anchor', is_flag=True, help='Anchor the latent space to w_avg to stabilize the video')
@@ -579,7 +585,13 @@ def circular_video(
         cfg: Optional[str],
         seed: int,
         truncation_psi: Optional[float],
+        truncation_psi_start: Optional[float],
+        truncation_psi_end: Optional[float],
+        global_pulsation_trick: Optional[bool],
+        wave_pulsation_trick: Optional[bool],
+        pulsation_frequency: Optional[int],
         new_center: Tuple[str, Union[int, np.ndarray]],
+        new_w_avg: Optional[Union[str, os.PathLike]],
         class_idx: Optional[int],
         noise_mode: Optional[str],
         anchor_latent_space: Optional[bool],
@@ -612,16 +624,35 @@ def circular_video(
     # Get center of the latent space (global or user-indicated)
     if new_center is None:
         w_avg = G.mapping.w_avg
+        w_avg = w_avg.view(1, 1, -1)  # [w_dim] => [1, 1, w_dim]
     else:
-        new_center, new_center_value = new_center
-        # We get the new center using the int (a seed) or recovered dlatent (an np.ndarray)
-        if isinstance(new_center_value, int):
-            w_avg = gen_utils.get_w_from_seed(G, device, new_center_value,
-                                              truncation_psi=1.0)  # We want the pure dlatent
-        elif isinstance(new_center_value, np.ndarray):
-            w_avg = torch.from_numpy(new_center_value).to(device)
+        # It's an int, so use as a seed
+        if new_center.isdigit():
+            w_avg = gen_utils.get_w_from_seed(G, device, int(new_center), truncation_psi=1.0).to(device)
+        # It's a file, so load it
+        elif os.path.isfile(new_center):
+            w_avg = gen_utils.get_latent_from_file(new_center, return_ext=False)
+            w_avg = torch.from_numpy(w_avg).to(device)
+        # It's a directory, so get all latents inside it (including subdirectories, so be careful)
+        elif os.path.isdir(new_center):
+            w_avg = gen_utils.parse_all_projected_dlatents(new_center)
+            w_avg = torch.tensor(w_avg).squeeze(1).to(device)
         else:
-            ctx.fail('Error: New center has strange format! Only an int (seed) or a file (.npy/.npz) are accepted!')
+            message = 'Only seeds (int) or paths to latent files (.npy/.npz) or directories containing these are allowed for "--new-center"'
+            raise ctx.fail(message)
+
+        # Some sanity checks
+        num_centers = len(w_avg)
+        if num_centers == 0:
+            raise ctx.fail('No centers were found! If files, makes sure they are .npy or .npz files.')
+        # Just one is provided, so this will be a sort of 'global' center
+        elif num_centers == 1:
+            print(f'Using only one center (if more than one is desired, provide a directory with all of them)')
+        elif num_centers != grid_height * grid_width:
+            message = f"Number of centers ({num_centers}) doesn't match the grid size ({grid_height}x{grid_width})"
+            raise ctx.fail(message)
+
+    print('Using wave pulsation trick' if wave_pulsation_trick else 'Using global pulsation trick' if global_pulsation_trick else 'Using no pulsation trick')
 
     # Stabilize/anchor the latent space
     if anchor_latent_space:
@@ -659,6 +690,19 @@ def circular_video(
         box_frames = all_latents[:, box]
         box_frames[:, [z1[box], z2[box]]] = np.vstack((Z1, Z2)).T
 
+    # Convert to torch tensor
+    if new_w_avg is not None:
+        print("Moving all the latent space towards the new center...")
+        _, new_w_avg = new_w_avg
+        # We get the new center using the int (a seed) or recovered dlatent (an np.ndarray)
+        if isinstance(new_w_avg, int):
+            new_w_avg = gen_utils.get_w_from_seed(G, device, new_w_avg,
+                                                  truncation_psi=1.0)  # We want the pure dlatent
+        elif isinstance(new_w_avg, np.ndarray):
+            new_w_avg = torch.from_numpy(new_w_avg).to(device)  # [1, num_ws, w_dim]
+        else:
+            ctx.fail('Error: New center has strange format! Only an int (seed) or a file (.npy/.npz) are accepted!')
+
     # Auxiliary function for moviepy
     def make_frame(t):
         frame_idx = int(np.clip(np.round(t * fps), 0, num_frames - 1))
@@ -666,9 +710,32 @@ def circular_video(
         # Get the images with the respective label
         dlatents = gen_utils.z_to_dlatent(G, latents, label, truncation_psi=1.0)  # Get the pure dlatent
         # Do truncation trick
-        w = w_avg + (dlatents - w_avg) * truncation_psi
+        # For the truncation trick (supersedes any value chosen for truncation_psi)
+        if None not in (truncation_psi_start, truncation_psi_end):
+            # For both, truncation psi will have the general form of a sinusoid: psi = (cos(t) + alpha) / beta
+            if global_pulsation_trick:
+                tr = gen_utils.global_pulsate_psi(psi_start=truncation_psi_start,
+                                                              psi_end=truncation_psi_end,
+                                                              n_steps=num_frames)
+            elif wave_pulsation_trick:
+                tr = gen_utils.wave_pulse_truncation_psi(psi_start=truncation_psi_start,
+                                                         psi_end=truncation_psi_end,
+                                                         n_steps=num_frames,
+                                                         grid_shape=grid_size,
+                                                         frequency=pulsation_frequency,
+                                                         time=frame_idx)
+        # Define how to use the truncation psi
+        if global_pulsation_trick:
+            tr = tr[frame_idx].to(device)
+        elif wave_pulsation_trick:
+            tr = tr.to(device)
+        else:
+            # It's a float, so we can just use it
+            tr = truncation_psi
+
+        w = w_avg + (dlatents - w_avg) * tr
         # Get the images
-        images = gen_utils.w_to_img(G, w, noise_mode)
+        images = gen_utils.w_to_img(G, w, noise_mode, new_w_avg, tr)
         # RGBA -> RGB
         images = images[:, :, :, :3]
         # Generate the grid for this timestep
@@ -696,7 +763,9 @@ def circular_video(
         'config': cfg,
         'seed': seed,
         'z1, z2': [[int(i), int(j)] for i, j in zip(z1, z2)],
-        'truncation_psi': truncation_psi,
+        'truncation_psi': truncation_psi if isinstance(truncation_psi, float) else 'pulsating',
+        'truncation_psi_start': truncation_psi_start,
+        'truncation_psi_end': truncation_psi_end,
         'new_center': new_center,
         'class_idx': class_idx,
         'noise_mode': noise_mode,

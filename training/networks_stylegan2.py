@@ -382,6 +382,9 @@ class ToRGBLayer(torch.nn.Module):
 
 #----------------------------------------------------------------------------
 
+# TODO: non-square images: https://github.com/skyflynil/stylegan2/blob/master/training/networks_stylegan2.py#L519
+# TODO: vs: https://github.com/NVlabs/stylegan2/blob/master/training/networks_stylegan2.py#L417
+
 @persistence.persistent_class
 class SynthesisBlock(torch.nn.Module):
     def __init__(self,
