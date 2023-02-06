@@ -121,7 +121,7 @@ def open_image_folder(source_dir, force_channels: int = None, *, max_images: Opt
                     img = img.convert('RGB')
                 # Force the number of channels if so requested
                 if force_channels is not None:
-                    img = img.convert(gen_utils.channels_dict[force_channels])
+                    img = img.convert(gen_utils.channels_dict[int(force_channels)])
                 img = np.array(img)
             except Exception as e:
                 sys.stderr.write(f'Failed to read {fname}: {e}')
@@ -162,7 +162,7 @@ def open_image_zip(source, force_channels: int = None, *, max_images: Optional[i
                             img = img.convert('RGB')
                         # Force the number of channels if so requested
                         if force_channels is not None:
-                            img = img.convert(gen_utils.channels_dict[force_channels])
+                            img = img.convert(gen_utils.channels_dict[int(force_channels)])
                         img = np.array(img)
                     except Exception as e:
                         sys.stderr.write(f'Failed to read {fname}: {e}')
