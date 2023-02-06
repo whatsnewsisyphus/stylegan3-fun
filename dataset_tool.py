@@ -79,19 +79,33 @@ def is_image_ext(fname: Union[str, Path]) -> bool:
 # ----------------------------------------------------------------------------
 
 
-def open_image_folder(source_dir, force_channels: int = None, *, max_images: Optional[int]):
+def open_image_folder(source_dir, force_channels: int = None, *, max_images: Optional[int], subfolders_as_labels: Optional[bool] = False):
     input_images = [str(f) for f in sorted(Path(source_dir).rglob('*')) if is_image_ext(f) and os.path.isfile(f)]
 
     # Load labels.
     labels = {}
     meta_fname = os.path.join(source_dir, 'dataset.json')
-    if os.path.isfile(meta_fname):
+    if os.path.isfile(meta_fname) and not subfolders_as_labels:
+        # The `dataset.json` file exists and will be used (whether empty or not)
         with open(meta_fname, 'r') as file:
             labels = json.load(file)['labels']
             if labels is not None:
                 labels = {x[0]: x[1] for x in labels}
             else:
                 labels = {}
+    elif subfolders_as_labels:
+        # Use the folders in the directory as the labels themselves
+        # Get the subfolder names from the input_images names
+        labels = {os.path.relpath(fname, source_dir).replace('\\', '/'): os.path.basename(os.path.dirname(fname)) for fname in input_images}
+        # Change folder name (value) to a number (from 0 to n-1)
+        label_names = list(set(labels.values()))
+        label_names.sort()
+        labels = {fname: label_names.index(label) for fname, label in labels.items()}
+        print(f'Conditional dataset has {len(label_names)} labels! Saving to `class_labels.txt` in the source directory...')
+        with open(os.path.join(source_dir, 'class_labels.txt'), 'w') as f:
+            # Write, one per line, the index and the label name
+            for i, label in enumerate(label_names):
+                f.write(f'{i}: {label}\n')
 
     max_idx = maybe_min(len(input_images), max_images)
 
@@ -131,7 +145,7 @@ def open_image_zip(source, force_channels: int = None, *, max_images: Optional[i
             with z.open('dataset.json', 'r') as file:
                 labels = json.load(file)['labels']
                 if labels is not None:
-                    labels = { x[0]: x[1] for x in labels }
+                    labels = {x[0]: x[1] for x in labels}
                 else:
                     labels = {}
 
@@ -330,12 +344,12 @@ def make_transform(
 # ----------------------------------------------------------------------------
 
 
-def open_dataset(source, force_channels, *, max_images: Optional[int]):
+def open_dataset(source, force_channels, *, max_images: Optional[int], subfolders_as_labels: Optional[bool] = False):
     if os.path.isdir(source):
         if source.rstrip('/').endswith('_lmdb'):
             return open_lmdb(source, max_images=max_images)
         else:
-            return open_image_folder(source, force_channels, max_images=max_images)
+            return open_image_folder(source, force_channels, max_images=max_images, subfolders_as_labels=subfolders_as_labels)
     elif os.path.isfile(source):
         if os.path.basename(source) == 'cifar-10-python.tar.gz':
             return open_cifar10(source, max_images=max_images)
@@ -392,6 +406,7 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 @click.option('--dest', help='Output directory or archive name for output dataset', required=True, metavar='PATH')
 @click.option('--max-images', help='Output only up to `max-images` images', type=int, default=None)
 @click.option('--force-channels', help='Force the number of channels in the image (1: grayscale, 3: RGB, 4: RGBA)', type=click.Choice(['1', '3', '4']), default=None)
+@click.option('--subfolders-as-labels', help='Use the folder names as the labels, to avoid setting up `dataset.json`', is_flag=True)
 @click.option('--transform', help='Input crop/resize mode', type=click.Choice(['center-crop', 'center-crop-wide', 'center-crop-tall']))
 @click.option('--resolution', help='Output resolution (e.g., \'512x512\')', metavar='WxH', type=parse_tuple)
 def convert_dataset(
@@ -400,6 +415,7 @@ def convert_dataset(
     dest: str,
     max_images: Optional[int],
     force_channels: Optional[int],
+    subfolders_as_labels: Optional[bool],
     transform: Optional[str],
     resolution: Optional[Tuple[int, int]]
 ):
@@ -467,7 +483,7 @@ def convert_dataset(
     if dest == '':
         ctx.fail('--dest output filename or directory must not be an empty string')
 
-    num_files, input_iter = open_dataset(source, force_channels, max_images=max_images)
+    num_files, input_iter = open_dataset(source, force_channels, max_images=max_images, subfolders_as_labels=subfolders_as_labels)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
 
     if resolution is None: resolution = (None, None)
@@ -506,7 +522,7 @@ def convert_dataset(
             if width != 2 ** int(np.floor(np.log2(width))):
                 error('Image width/height after scale and crop are required to be power-of-two')
         elif dataset_attrs != cur_image_attrs:
-            err = [f'  dataset {k}/cur image {k}: {dataset_attrs[k]}/{cur_image_attrs[k]}' for k in dataset_attrs.keys()] # pylint: disable=unsubscriptable-object
+            err = [f'  dataset {k}/cur image {k}: {dataset_attrs[k]}/{cur_image_attrs[k]}' for k in dataset_attrs.keys()]  # pylint: disable=unsubscriptable-object
             error(f'Image {archive_fname} attributes must be equal across all images of the dataset.  Got:\n' + '\n'.join(err))
 
         # Save the image as an uncompressed PNG.

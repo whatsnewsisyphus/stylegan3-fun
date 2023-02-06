@@ -25,8 +25,11 @@ This repository adds/has the following changes (not yet the complete list):
   * The dataset can be forced to be of a specific number of channels, that is, grayscale, RGB or RGBA.
     * To use this, set `--force-channels=1` for grayscale, `--force-channels=3` for RGB, and `--force-channels=4` for RGBA.
   * If the dataset tool encounters an error, print it along the offending image, but continue with the rest of the dataset 
-    ([PR #39](https://github.com/NVlabs/stylegan3/pull/39) from [Andreas Jansson](https://github.com/andreasjansson)). 
-  * ***TODO:*** Add multi-crop, as used in [Earth View](https://github.com/PDillis/earthview#multi-crop---data_augmentpy).
+    ([PR #39](https://github.com/NVlabs/stylegan3/pull/39) from [Andreas Jansson](https://github.com/andreasjansson)).
+  * For conditional models, we can use the subdirectories as the classes by adding `--subfolders-as-labels`. This will 
+  generate the `dataset.json` file automatically as done by @pbaylies [here](https://github.com/pbaylies/stylegan2-ada/blob/a8f0b1c891312631f870c94f996bcd65e0b8aeef/dataset_tool.py#L772)
+    * Additionally, in the `--source` folder, we will save a `class_labels.txt` file, to further know which classes correspond to each subdirectory.
+
 * ***Training***
   * `--mirrory`: Added vertical mirroring for doubling the dataset size (quadrupling if `--mirror` is used; make sure your dataset has either or both 
     of these symmetries in order for it to make sense to use them)
@@ -159,9 +162,9 @@ This repository adds/has the following changes (not yet the complete list):
   * Multi-modal truncation trick: finish skeleton code, add automatic selection of centroid (w.r.t. L2 or LPIPS; user-selected)
   * [PTI](https://github.com/danielroich/PTI) for better inversion
   * [Better sampling](https://arxiv.org/abs/2110.08009)
-  * [Progressive growing modules for StyleGAN-XL](https://github.com/autonomousvision/stylegan_xl) to be able to use the pretrained models
   * [Add cross-model interpolation](https://twitter.com/arfafax/status/1297681537337446400?s=20&t=xspnTaLFTvd7y4krg8tkxA)
-  * Generate class labels automatically with dataset structure (subfolders and such)
+  * Blend different models (average checkpoints, copy weights, create initial network), as in @aydao's [StyleGAN2-Surgery](https://github.com/aydao/stylegan2-surgery)
+  * ***TODO:*** Add multi-crop for the dataset creation, as used in [Earth View](https://github.com/PDillis/earthview#multi-crop---data_augmentpy).
   * Make it easy to download pretrained models from Drive, otherwise a lot of models can't be used with `dnnlib.util.open_url`
     (e.g., [StyleGAN-Human](https://github.com/stylegan-human/StyleGAN-Human) models)
   * Finish documentation for better user experience, add videos/images, code samples, visuals...
