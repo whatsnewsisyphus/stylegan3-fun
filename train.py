@@ -265,8 +265,8 @@ def main(**kwargs):
 
         # Aydao's config (to be tested later)
         # Double Generator capacity
-        c.G_kwargs.fmap_base = 32 << 10  # (default already)
-        c.G_kwargs.fmap_max = 1024
+        c.G_kwargs.channel_base = c.D_kwargs.channel_base = 32 << 10  # (default already)
+        c.G_kwargs.channel_max = c.D_kwargs.channel_max = 1024
 
         c.loss_kwargs.r1_gamma = 5  # For now, set as default to 5, but we should better play with this
 
