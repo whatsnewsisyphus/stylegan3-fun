@@ -125,7 +125,7 @@ def parse_comma_separated_list(s):
 
 @click.command()
 # Required.
-@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
+@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2', 'stylegan2-ext']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=click.Path(exists=True, dir_okay=False), required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
 @click.option('--batch',        help='Total batch size', metavar='INT',                         type=click.IntRange(min=1), required=True)
@@ -255,6 +255,27 @@ def main(**kwargs):
         c.G_reg_interval = 4 # Enable lazy regularization for G.
         c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
         c.loss_kwargs.pl_no_weight_grad = True # Speed up path length regularization by skipping gradient computation wrt. conv2d weights.
+    elif opts.cfg == 'stylegan2-ext':
+        # CIFAR's config
+        c.loss_kwargs.pl_weight = 0 # Disable path length regularization (default)
+        c.loss_kwargs.style_mixing_prob = 0 # Disable style mixing regularization (default)
+        c.D_kwargs.architecture = 'orig'  # Disable residual skip connections in D
+        c.G_kwargs.mapping_kwargs.num_layers = 2  # Disable mapping layer
+        c.ema_kimg = 500
+
+        # Aydao's config (to be tested later)
+        # Double Generator capacity
+        c.G_kwargs.fmap_base = 32 << 10  # (default already)
+        c.G_kwargs.fmap_max = 1024
+
+        c.loss_kwargs.r1_gamma = 5  # For now, set as default to 5, but we should better play with this
+
+        # Mapping layer
+        # c.G_kwargs.mapping_kwargs.num_layers = 4  # TODO: test with a higher number later on
+        # c.G_kwargs.mapping_kwargs.w_dim = 1024  # TODO: test with a wider mapping network later on
+        # TODO: Enable top-k training
+        # TODO: Reduce in-memory size (lower batch size, more layers with fp16, etc)
+
     else:
         c.G_kwargs.class_name = 'training.networks_stylegan3.Generator'
         c.G_kwargs.magnitude_ema_beta = 0.5 ** (c.batch_size / (20 * 1e3))
