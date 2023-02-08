@@ -257,6 +257,7 @@ def main(**kwargs):
         c.loss_kwargs.pl_no_weight_grad = True # Speed up path length regularization by skipping gradient computation wrt. conv2d weights.
     elif opts.cfg == 'stylegan2-ext':
         # CIFAR's config
+        c.G_kwargs.class_name = 'training.networks_stylegan2.Generator'
         c.loss_kwargs.pl_weight = 0 # Disable path length regularization (default)
         c.loss_kwargs.style_mixing_prob = 0 # Disable style mixing regularization (default)
         c.D_kwargs.architecture = 'orig'  # Disable residual skip connections in D
