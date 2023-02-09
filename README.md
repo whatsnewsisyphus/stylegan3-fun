@@ -12,13 +12,17 @@ capabilities (but hopefully not its complexity!).
 
 This repository adds/has the following changes (not yet the complete list):
 
-* ***Dataset tool***
-  * **Add RGBA support**, so revert saving images to `.png` ([Issue #156](https://github.com/NVlabs/stylegan3/issues/156) by @1378dm). Training can use RGBA and images can be generated.
+* ***Dataset Setup (`dataset_tool.py`)***
+  * **RGBA support**, so revert saving images to `.png` ([Issue #156](https://github.com/NVlabs/stylegan3/issues/156) by @1378dm). Training can use RGBA and images can be generated.
     * ***TODO:*** ~~Check that training code is correct for normalizing the alpha channel~~, as well as making the 
       interpolation code work with this new format (look into [`moviepy.editor.VideoClip`](https://zulko.github.io/moviepy/getting_started/videoclips.html?highlight=mask#mask-clips))
-    * For now, interpolations will only be saved in RGB format.
-  * **Add `--center-crop-tall`**: add vertical black bars to the sides instead, in the same vein as the horizontal bars in
-    `--center-crop-wide`.
+    * For now, interpolation videos will only be saved in RGB format, e.g., discarding the alpha channel.
+  * **`--center-crop-tall`**: add vertical black bars to the sides of each image in the dataset (rectangular images, with height > width),
+    and you wish to train a square model, in the same vein as the horizontal bars added when using `--center-crop-wide` (where width > height).
+    * This is useful when you don't want to lose information from the left and right side of the image by only using the center
+      crop (ibidem for `--center-crop-wide`, but for the top and bottom of the image)
+    * Note that each image doesn't have to be of the same size, and the added bars will only ensure you get a square image, which will then be
+      resized to the model's desired resolution (set by `--resolution`).
   * Grayscale images in the dataset are converted to `RGB`
     * If you want to turn this off, remove the respective line in `dataset_tool.py`, e.g., if your dataset is made of images in a folder, then the function to be used is
     `open_image_folder` in `dataset_tool.py`, and the line to be removed is `img = img.convert('RGB')` in the `iterate_images` inner function.
@@ -52,7 +56,7 @@ This repository adds/has the following changes (not yet the complete list):
   * `--resume`: All available pre-trained models from NVIDIA (and more) can be used with a simple dictionary, depending on the `--cfg` used.
   For example, if you wish to use StyleGAN3's `config-r`, then set `--cfg=stylegan3-r`. In addition, if you wish to transfer learn from FFHQU at 1024 resolution, set `--resume=ffhqu1024`.
     * The full list of currently available models to transfer learn from (or synthesize new images with) is the following (***TODO:*** add small description of each model, 
-    so the user can better know which to use for their particular usecase; proper citation to original authors as well):
+    so the user can better know which to use for their particular use-case; proper citation to original authors as well):
     
         <details>
         <summary>StyleGAN2 models</summary>
@@ -84,6 +88,7 @@ This repository adds/has the following changes (not yet the complete list):
          * `maps1024` (thanks to @tjukanov)
          * `fursona512` (thanks to @arfafax)
          * `mlpony512` (thanks to @arfafax)
+         * `lhq1024` (thanks to @justinpinkney)
          * `afhqcat256` (Deceive-D/APA models)
          * `anime256` (Deceive-D/APA models)
          * `cub256` (Deceive-D/APA models)
