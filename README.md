@@ -168,9 +168,10 @@ This repository adds/has the following changes (not yet the complete list):
     * Add PR [#173](https://github.com/NVlabs/stylegan3/pull/173) for adding the last remaining unknown kwarg for using StyleGAN2 models using TF 1.15.
 * ***TODO*** list (this is a long one with more to come, so any help is appreciated):
   * Define a [custom Generator](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/59e05bb115c1c7d0de56be0523754076c2b7ee83/legacy.py#L131) in `legacy.py` to modify the output size
-    * Related: the [multi-latent](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/main/training/stylegan2_multi.py)
+    * Related: the [multi-latent](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/main/training/stylegan2_multi.py), i.e., the one from [@eps696](https://github.com/eps696/stylegan2)
   * Add [Top-K training](https://arxiv.org/abs/2002.06224) as done [here](https://github.com/dvschultz/stylegan2-ada/blob/8f4ab24f494483542d31bf10f4fdb0005dc62739/train.py#L272) and [here](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/59e05bb115c1c7d0de56be0523754076c2b7ee83/training/loss.py#L79)
   * Multi-modal truncation trick: finish skeleton code, add automatic selection of centroid (w.r.t. L2 or LPIPS; user-selected)
+  * Add panorama/SinGAN/feature interpolation from [StyleGAN of All Trades](https://arxiv.org/abs/2111.01619)
   * [PTI](https://github.com/danielroich/PTI) for better inversion
   * [Better sampling](https://arxiv.org/abs/2110.08009)
   * [Add cross-model interpolation](https://twitter.com/arfafax/status/1297681537337446400?s=20&t=xspnTaLFTvd7y4krg8tkxA)
