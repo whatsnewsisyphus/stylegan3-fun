@@ -33,10 +33,11 @@ This repository adds/has the following changes (not yet the complete list):
 * ***Training***
   * Add `--cfg=stylegan2-ext`, which uses @aydao's extended modifications for handling large and diverse datasets. 
     * A good explanation is found in Gwern's blog [here](https://gwern.net/face#extended-stylegan2-danbooru2019-aydao)
+    * Note: ***This is extremely experimental and still incomplete!*** Do not use it unless you want to test another possible StyleGAN2 configuration!
   * `--mirrory`: Added vertical mirroring for doubling the dataset size (quadrupling if `--mirror` is used; make sure your dataset has either or both 
     of these symmetries in order for it to make sense to use them)
   * `--gamma`: If no R1 regularization is provided, the heuristic formula from [StyleGAN](https://github.com/NVlabs/stylegan2) will be used.
-    * Specifically, `gamma=0.0002 * resolution ** 2 / batch_size`
+    * Specifically, we will set `gamma=0.0002 * resolution ** 2 / batch_size`
   * `--aug`: ***TODO:*** add [Deceive-D/APA](https://github.com/EndlessSora/DeceiveD) as an option.
   * `--augpipe`: Now available to use is [StyleGAN2-ADA's](https://github.com/NVlabs/stylegan2-ada-pytorch) full list of augpipe, i.e., individual augmentations (`blit`, `geom`, `color`, `filter`, `noise`, `cutout`) or their combinations (`bg`, `bgc`, `bgcf`, `bgcfn`, `bgcfnc`).
   * `--img-snap`: Set when to save snapshot images, so now it's independent of when the model is saved (e.g., save image snapshots more often to know how the model is training without saving the model itself, to save space).

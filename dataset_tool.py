@@ -220,7 +220,7 @@ def open_cifar10(tarball: str, *, max_images: Optional[int]):
 
     images = np.concatenate(images)
     labels = np.concatenate(labels)
-    images = images.transpose([0, 2, 3, 1]) # NCHW -> NHWC
+    images = images.transpose([0, 2, 3, 1])  # NCHW -> NHWC
     assert images.shape == (50000, 32, 32, 3) and images.dtype == np.uint8
     assert labels.shape == (50000,) and labels.dtype in [np.int32, np.int64]
     assert np.min(images) == 0 and np.max(images) == 255
@@ -252,7 +252,7 @@ def open_mnist(images_gz: str, *, max_images: Optional[int]):
         labels = np.frombuffer(f.read(), np.uint8, offset=8)
 
     images = images.reshape(-1, 28, 28)
-    images = np.pad(images, [(0,0), (2,2), (2,2)], 'constant', constant_values=0)
+    images = np.pad(images, [(0, 0), (2, 2), (2, 2)], 'constant', constant_values=0)
     assert images.shape == (60000, 32, 32) and images.dtype == np.uint8
     assert labels.shape == (60000,) and labels.dtype == np.uint8
     assert np.min(images) == 0 and np.max(images) == 255
@@ -451,7 +451,7 @@ def convert_dataset(
         "labels": [
             ["00000/img00000000.png",6],
             ["00000/img00000001.png",9],
-            ... repeated for every image in the datase
+            ... repeated for every image in the dataset
             ["00049/img00049999.png",1]
         ]
     }
