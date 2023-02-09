@@ -261,15 +261,15 @@ def main(**kwargs):
         c.loss_kwargs.pl_weight = 0 # Disable path length regularization (default)
         c.loss_kwargs.style_mixing_prob = 0 # Disable style mixing regularization (default)
         c.D_kwargs.architecture = 'orig'  # Disable residual skip connections in D
-        c.G_kwargs.mapping_kwargs.num_layers = 2  # Disable mapping layer
+        c.G_kwargs.mapping_kwargs.num_layers = 2  # Lower the number of layers in the mapping network
         c.ema_kimg = 500
 
         # Aydao's config (to be tested later)
         # Double Generator capacity
-        c.G_kwargs.channel_base = c.D_kwargs.channel_base = 32 << 10  # (default already)
-        c.G_kwargs.channel_max = c.D_kwargs.channel_max = 1024
+        # c.G_kwargs.channel_base = c.D_kwargs.channel_base = 32 << 10  # (default already)
+        # c.G_kwargs.channel_max = c.D_kwargs.channel_max = 1024
 
-        c.loss_kwargs.r1_gamma = 5  # For now, set as default to 5, but we should better play with this
+        # c.loss_kwargs.r1_gamma = 5  # For now, set as default to 5, but we should better play with this
 
         # Mapping layer
         # c.G_kwargs.mapping_kwargs.num_layers = 4  # TODO: test with a higher number later on
