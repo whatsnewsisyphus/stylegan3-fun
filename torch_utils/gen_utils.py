@@ -168,29 +168,6 @@ def parse_all_projected_dlatents(s: str) -> List[torch.Tensor]:
 
     return dlatents
 
-# get all the .png files in a given directory and subdirectories sorted by name
-# s='./out/projection_aifilmfestival/frame5_ethereal/'
-# files = [os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(s)) for f in fn]
-# # Remove those that don't have 'final' in the name
-# files = [f for f in files if 'final' in f]
-# files = sorted(files, key=lambda x: int(''.join(filter(str.isdigit, x))))
-# # Remove non image files
-# files = [f for f in files if f.endswith('.jpg')]
-# # Define a function mesh_images to join all images in files, with number of rows, columns, and size of each image
-# def mesh_images(files, rows, cols, size):
-#     mesh = Image.new('RGB', (cols * size, rows * size))
-#     for idx, f in enumerate(files):
-#         img = Image.open(f)
-#         img = img.resize((size, size), Image.ANTIALIAS)
-#         mesh.paste(img, (size * (idx % cols), size * (int(idx / cols))))
-#     return mesh
-#
-# # Mesh all images in files into a grid of 15 columns by 9 rows with Pillow or numpy
-# grid = mesh_images(files, 9, 15, 256)
-#
-# # Save meshed image in the s directory
-# grid.save(os.path.join(s, 'final_projection_meshed.jpg'))
-
 
 def load_network(name: str, network_pkl: Union[str, os.PathLike], cfg: Optional[str], device: torch.device):
     """Load and return the discriminator D from a trained network."""
@@ -381,64 +358,58 @@ def wave_pulse_truncation_psi(psi_start: float,
                               n_steps: int,
                               grid_shape: Tuple[int, int],
                               frequency: int,
-                              time: int) -> torch.Tensor:  # Output shape: [num_grids, 1, 1]
+                              time: int) -> torch.Tensor:  # Output shape: [num_grid_cells, 1, 1]
     """
     Pulsate the truncation psi parameter between start and end, taking n_steps on a sinusoidal wave on a grid
+        Note: The output shape should be [math.prod(grid_shape), 1, 1]
     """
     # Let's save some headaches, shall we?
     if psi_start == psi_end:
         import math
         return torch.ones(math.prod(grid_shape), 1, 1) * psi_start
-    # The rest is assuming they're different
-    alpha = (psi_start + psi_end) / (psi_start - psi_end)
-    beta = 2 / (psi_start - psi_end)
 
-
+    # We define a total time, but note it's specific to our definition of the wave below (the 2*pi in the conditions)
     total_time = 5 * torch.pi  # T
-    delta = torch.pi
     timesteps = torch.arange(0, total_time, total_time / n_steps)
 
     # Envolope function
     def envelope(time):
-        """Envelope function: if time > delta or <= total_time / 2, reutnr a*t + b; if time > total_time / 2 and time <= total_time - delta, return c*t + d"""
-        # a = (psi_start - psi_end) / (delta - total_time)
-        # b = psi_end - a * delta
-        # c = - a
-        # d = psi_end - c * total_time / 2
-        #
-        # return torch.where(torch.gt(time, delta) & torch.lt(time, total_time / 2),
-        #                    a * time + b,
-        #                    torch.where(torch.gt(time, total_time / 2) & torch.lt(time, total_time - delta),
-        #                                c * time + d,
-        #                                torch.tensor(psi_start))) / psi_start
-        """ Envelope function that is a 1d Gabor filter """
+        """ Envelope function that will regulate the amplitude of the wave; usage: envelope(time) * wave(time) """
+        # Example: a 1D Gabor filter
         # gaussian = torch.exp(-(time - total_time / 2) ** 2 / 16)
         # sinusoid = torch.exp(1j * torch.pi(time - total_time / 2) / 2)
         # return torch.sin(time * torch.pi / total_time) / 2 + 0.5
         return torch.tensor(1.0)
 
+    # Define the grid itself as a 2D grid where we will evaluate our wave function/psi
     width, height = grid_shape
-
     xs = torch.arange(0, 2*torch.pi, 2*torch.pi/width)
     ys = torch.arange(0, 2*torch.pi, 2*torch.pi/height)
     x, y = torch.meshgrid(xs, ys, indexing='xy')
 
-    # Define the wave equation (go crazy)
+    # Define the wave equation (go crazy here!)
+    # In my case, I will use a sinusoidal wave with source at the upper-left corner of the grid
+    # The wave will travel radially from the source, and will be truncated at the edges of the grid with the psi_start value
     r = torch.sqrt(x ** 2 + y ** 2)
-    # alpha = psi_start / (psi_start - psi_end)
-    # beta = 1 / (psi_start - psi_end)
-    # gaussian = torch.exp(-torch.pow(r - timesteps[time] - total_time / 2, 2)) / 8
-    # sinusoid = torch.exp(1j * 2 * torch.pi * (r - timesteps[time] - total_time / 2) / 2)
-    # ps = (alpha - torch.pow(gaussian * torch.real(sinusoid), 2)) / beta
 
-    def psi(alpha):
-        return psi_start + alpha * (psi_end - psi_start)
+    # The wave function is defined by parts, that is, keep it constant (psi_start) before and after the wave; its
+    # general shape in 1D will be psi(x, t) = (cos(f(x-t)) + alpha) / beta, where alpha and beta are defined so as to
+    # satisfy the boundary conditions (psi(x, 0) = psi_start, psi(x, T/2) = psi_end, psi(x, T) = psi_start))
+    alpha = (psi_start + psi_end) / (psi_start - psi_end)
+    beta = 2 / (psi_start - psi_end)
 
+    def truncate(value):
+        """
+        Auxiliary function to interpolate between your start and end psi. Use to translate from "value=0" (psi_start)
+        to "value=1" (psi_end) """
+        return psi_start + value * (psi_end - psi_start)
+
+    # Define the wave function by parts, that is, keep it constant (psi_start) before and after the wave
     truncation_psi = torch.where(torch.gt(r, timesteps[time]) | torch.lt(r, timesteps[time] - 2 * torch.pi),
                                  torch.tensor(psi_start),
-                                 psi(torch.sin(r / (8**0.5)) * (torch.cos(frequency * (r - timesteps[time])))**2))
-                                 # (torch.cos(frequency * (r - timesteps[time])) + alpha) / beta)
+                                 (torch.cos(frequency * (r - timesteps[time])) + alpha) / beta)
 
+    # Make sure the output is of the right shape
     truncation_psi = truncation_psi.view(width*height, 1, 1)
     return truncation_psi
 

@@ -671,7 +671,11 @@ def circular_video(
     random_state = np.random.RandomState(seed)
     # Choose two random dims on which to plot the circles (from 0 to G.z_dim-1),
     # one pair for each element of the grid (2*grid_width*grid_height in total)
-    z1, z2 = np.split(random_state.choice(G.z_dim, 2 * np.prod(grid_size), replace=False), 2)
+    try:
+        z1, z2 = np.split(random_state.choice(G.z_dim, 2 * np.prod(grid_size), replace=False), 2)
+    except ValueError:
+        # Extreme case: G.z_dim < 2 * grid_width * grid_height (low G.
+        z1, z2 = np.split(random_state.choice(G.z_dim, 2 * np.prod(grid_size), replace=True), 2)
 
     # We partition the circle in equal strides w.r.t. num_frames
     get_angles = lambda num_frames: np.linspace(0, 2*np.pi, num_frames)
