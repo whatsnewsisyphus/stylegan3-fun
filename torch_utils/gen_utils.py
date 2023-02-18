@@ -50,7 +50,7 @@ def create_image_grid(images: np.ndarray, grid_size: Optional[Tuple[int, int]] =
         grid_h = max((num - 1) // grid_w + 1, 1)
 
     # Sanity check
-    assert grid_w * grid_h >= num, 'Number of rows and columns must be greater than the number of images!'
+    assert grid_w * grid_h >= num, 'Number of rows and columns in the grid must be greater than the number of images!'
     # Get the grid
     grid = np.zeros([grid_h * img_h, grid_w * img_h] + list(images.shape[-1:]), dtype=images.dtype)
     # Paste each image in the grid
