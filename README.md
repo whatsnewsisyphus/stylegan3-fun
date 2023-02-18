@@ -167,6 +167,8 @@ This repository adds/has the following changes (not yet the complete list):
       * The StyleGAN-NADA models must first be converted via [Vadim Epstein](https://github.com/eps696) 's conversion code found [here](https://github.com/eps696/stylegan2ada#tweaking-models).
     * Add PR [#173](https://github.com/NVlabs/stylegan3/pull/173) for adding the last remaining unknown kwarg for using StyleGAN2 models using TF 1.15.
 * ***TODO*** list (this is a long one with more to come, so any help is appreciated):
+  * Add `--device={cuda, ref}` option to pass to each of the custom operations in order to (theoretically) be able to use AMD GPUs, as explained in
+  @l4rz's post [here](https://github.com/l4rz/practical-aspects-of-stylegan2-training#hardware)
   * Define a [custom Generator](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/59e05bb115c1c7d0de56be0523754076c2b7ee83/legacy.py#L131) in `legacy.py` to modify the output size
     * Related: the [multi-latent](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/main/training/stylegan2_multi.py), i.e., the one from [@eps696](https://github.com/eps696/stylegan2)
   * Add [Top-K training](https://arxiv.org/abs/2002.06224) as done [here](https://github.com/dvschultz/stylegan2-ada/blob/8f4ab24f494483542d31bf10f4fdb0005dc62739/train.py#L272) and [here](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/59e05bb115c1c7d0de56be0523754076c2b7ee83/training/loss.py#L79)

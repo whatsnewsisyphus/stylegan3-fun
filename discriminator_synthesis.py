@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.autograd import Variable
 from torchvision import transforms
 
@@ -78,7 +80,7 @@ def get_image(seed: int = 0,
                 g_cuda = torch.Generator(device=device).manual_seed(seed)
                 rgb = FractalPerlin2D(shape, resolutions, factors, generator=g_cuda)().cpu().numpy()
                 rgb = (255 * (rgb + 1) / 2).astype(np.uint8)  # [-1.0, 1.0] => [0, 255]
-                image = Image.fromarray(np.stack(rgb, axis=2), 'RGB')
+                image = Image.fromarray(rgb.transpose(1, 2, 0), 'RGB')  # Reshape leads us to weird tiling
 
             except ImportError:
                 raise ImportError('pyperlin not found! Install it via "pip install pyperlin"')
@@ -218,23 +220,99 @@ def deep_dream(image: PIL.Image.Image,
 
 # ----------------------------------------------------------------------------
 
+# Helper functions (all base code taken from: https://pytorch.org/tutorials/advanced/neural_style_tutorial.html)
 
-@main.command(name='style-transfer')
-def style_transfer_discriminator():
+
+class ContentLoss(nn.Module):
+
+    def __init__(self, target,):
+        super(ContentLoss, self).__init__()
+        # we 'detach' the target content from the tree used
+        # to dynamically compute the gradient: this is a stated value,
+        # not a variable. Otherwise the forward method of the criterion
+        # will throw an error.
+        self.target = target.detach()
+
+    def forward(self, input):
+        self.loss = F.mse_loss(input, self.target)
+        return input
+
+
+def gram_matrix(input):
+    a, b, c, d = input.size()  # (batch_size, no. feature maps, dims of a f. map (N=c*d))
+
+    features = input.view(a * b, c * d)  # resize F_XL into \hat F_XL
+
+    G = torch.mm(features, features.t())  # compute the gram product
+
+    # 'Normalize' the values of the gram matrix by dividing by the number of element in each feature maps.
+    return G.div(a * b * c * d)  # can also do torch.numel(input) to get the number of elements
+
+
+class StyleLoss(nn.Module):
+    def __init__(self, target_feature):
+        super(StyleLoss, self).__init__()
+        self.target = gram_matrix(target_feature).detach()
+
+    def forward(self, input):
+        G = gram_matrix(input)
+        self.loss = F.mse_loss(G, self.target)
+        return input
+
+
+@main.command(name='style-transfer', help='Use the StyleGAN2/3 Discriminator to perform style transfer')
+@click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
+@click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
+@click.option('--content', type=str, help='Content image filename (url or local path)', required=True)
+@click.option('--style', type=str, help='Style image filename (url or local path)', required=True)
+def style_transfer_discriminator(
+        ctx: click.Context,
+        network_pkl: str,
+        cfg: str,
+        content: str,
+        style: str,
+):
     print('Coming soon!')
     # Reference: https://pytorch.org/tutorials/advanced/neural_style_tutorial.html
+
+    # Set up device
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    imsize = 512 if torch.cuda.is_available() else 128  # use small size if no gpu
+
+    loader = transforms.Compose([transforms.Resize(imsize),  # scale imported image
+                                transforms.ToTensor()])  # transform it into a torch tensor
+
+    # Helper function
+    def image_loader(image_name):
+        image = Image.open(image_name)
+        # fake batch dimension required to fit network's input dimensions
+        image = loader(image).unsqueeze(0)
+        return image.to(device, torch.float)
+
+    style_img = image_loader(style)
+    content_img = image_loader(content)
+
+    # This shouldn't really happen, but just in case
+    assert style_img.size() == content_img.size(), 'Style and content images must be the same size'
+
+    unloader = transforms.ToPILImage()  # reconvert into PIL image
+
+    # Load Discriminator
+    D = gen_utils.load_network('D', network_pkl, cfg, device)
+    # TODO: finish this!
 
 
 # ----------------------------------------------------------------------------
 
 
-@main.command(name='dream')
+@main.command(name='dream', help='Discriminator Dreaming with the StyleGAN2/3 Discriminator and the chosen layers')
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
 # Synthesis options
-@click.option('--seeds', type=gen_utils.num_range, help='Random seeds to use. Accepted comma-separated values, ranges, or combinations: "a,b,c", "a-c", "a,b-d,e".', default=0)
-@click.option('--random-image-noise', '-noise', 'image_noise', type=click.Choice(['random', 'perlin']), default='random', show_default=True)
+@click.option('--seeds', type=gen_utils.num_range, help='Random seeds to use. Accepted comma-separated values, ranges, or combinations: "a,b,c", "a-c", "a,b-d,e".', default='0')
+@click.option('--random-image-noise', '-noise', 'image_noise', type=click.Choice(['random', 'perlin']), default='perlin', show_default=True)
 @click.option('--starting-image', type=str, help='Path to image to start from', default=None)
 @click.option('--convert-to-grayscale', '-grayscale', is_flag=True, help='Add flag to grayscale the initial image')
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)', default=None)
@@ -358,6 +436,7 @@ def discriminator_dream(
         desc = f'{desc}-{description}' if len(description) != 0 else desc
         run_dir = gen_utils.make_run_dir(outdir, desc)
 
+        starting_images, used_seeds = [], []
         for seed in seeds:
             # Get the image and image name
             image, starting_image = get_image(seed=seed, image_noise=image_noise,
@@ -370,30 +449,9 @@ def discriminator_dream(
                                        sqrt_normed=sqrt_norm_model_layers, iterations=iterations, lr=learning_rate,
                                        octave_scale=octave_scale, num_octaves=num_octaves, unzoom_octave=unzoom_octave)
 
-            # Save the configuration used
-            ctx.obj = {
-                'network_pkl': network_pkl,
-                'synthesis_options': {
-                    'seed': seed,
-                    'starting_image': starting_image,
-                    'class_idx': class_idx,
-                    'learning_rate': learning_rate,
-                    'iterations': iterations},
-                'layer_options': {
-                    'layer': layers,
-                    'channels': channels,
-                    'norm_model_layers': norm_model_layers,
-                    'sqrt_norm_model_layers': sqrt_norm_model_layers},
-                'octaves_options': {
-                    'octave_scale': octave_scale,
-                    'num_octaves': num_octaves,
-                    'unzoom_octave': unzoom_octave},
-                'extra_parameters': {
-                'outdir': run_dir,
-                'description': description}
-            }
-            # Save the run configuration
-            gen_utils.save_config(ctx=ctx, run_dir=run_dir)
+            # For logging later
+            starting_images.append(starting_image)
+            used_seeds.append(seed)
 
             # Save the resulting image and initial image
             filename = f'dreamed_{os.path.basename(starting_image)}'
@@ -401,11 +459,37 @@ def discriminator_dream(
             image.save(os.path.join(run_dir, os.path.basename(starting_image)))
             starting_image = None
 
+        # Save the configuration used
+        ctx.obj = {
+            'network_pkl': network_pkl,
+            'synthesis_options': {
+                'seeds': used_seeds,
+                'starting_image': starting_images,
+                'class_idx': class_idx,
+                'learning_rate': learning_rate,
+                'iterations': iterations},
+            'layer_options': {
+                'layer': layers,
+                'channels': channels,
+                'norm_model_layers': norm_model_layers,
+                'sqrt_norm_model_layers': sqrt_norm_model_layers},
+            'octaves_options': {
+                'octave_scale': octave_scale,
+                'num_octaves': num_octaves,
+                'unzoom_octave': unzoom_octave},
+            'extra_parameters': {
+                'outdir': run_dir,
+                'description': description}
+        }
+        # Save the run configuration
+        gen_utils.save_config(ctx=ctx, run_dir=run_dir)
+
 
 # ----------------------------------------------------------------------------
 
 
-@main.command(name='dream-zoom')
+@main.command(name='dream-zoom',
+              help='Zoom/rotate/translate after each Discriminator Dreaming iteration. A video will be saved.')
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
@@ -596,7 +680,7 @@ def channel_zoom():
 # ----------------------------------------------------------------------------
 
 
-@main.command(name='random-interp')
+@main.command(name='interp', help='Interpolate between two or more seeds')
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)

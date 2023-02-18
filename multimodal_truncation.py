@@ -1,113 +1,149 @@
 import os
-# from typing import List, Optional, Union, Tuple
-# import click
+from typing import List, Optional, Union, Tuple
+import click
 
 import dnnlib
 from torch_utils import gen_utils
 
-# import scipy
+import scipy
 import numpy as np
 import PIL.Image
 import torch
 
 import legacy
 
-# os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = 'hide'
-# import moviepy.editor
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-# ----------------------------------------------------------------------------
-
-# TODO: make this nice! For now it's just meant for a quick test/defining parameters to use in general
-# # We group the different types of generation (images, grid, video, wacky stuff) into a main function
-# @click.group()
-# def main():
-#     pass
-
 
 # ----------------------------------------------------------------------------
-network_pkl = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-afhqv2-512x512.pkl'
-description = 'afhq512-t'
-outdir = './out/multimodal/sgan3'
-seed = 0
 
-num_latents = 60000  # keep fixed
-num_clusters = 64  # 32, 64, 128
+# TODO/hax: Use this for generation: https://huggingface.co/spaces/SIGGRAPH2022/Self-Distilled-StyleGAN/blob/main/model.py
+# SGANXL uses it for generation w/L2 norm: https://github.com/autonomousvision/stylegan_xl/blob/4241ff9cfeb69d617427107a75d69e9d1c2d92f2/torch_utils/gen_utils.py#L428
+@click.group()
+def main():
+    pass
 
-print(f'Loading networks from "{network_pkl}"...')
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-with dnnlib.util.open_url(network_pkl) as f:
-    G = legacy.load_network_pkl(f)['G_ema'].to(device)  # type: ignore
 
-desc = f'multimodal-truncation-{num_clusters}clusters'
-desc = f'{desc}-{description}' if len(description) != 0 else desc
-# Create the run dir with the given name description
-run_dir = gen_utils.make_run_dir(outdir, desc)
+# ----------------------------------------------------------------------------
 
-print('Generating all the latents...')
-z = torch.from_numpy(np.random.RandomState(seed).randn(num_latents, G.z_dim)).to(device)
-w = G.mapping(z, None)[:, 0, :]
 
-scaler = StandardScaler()
-scaler.fit(w.cpu())
+@main.command(name='get-centroids')
+@click.pass_context
+@click.option('--network', 'network_pkl', help='Network pickle filename: can be URL, local file, or the name of the model in torch_utils.gen_utils.resume_specs', required=True)
+@click.option('--device', help='Device to use for image generation; using the CPU is slower than the GPU', type=click.Choice(['cpu', 'cuda']), default='cuda', show_default=True)
+@click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
+# Centroids options
+@click.option('--seed', type=int, help='Random seed to use', default=0, show_default=True)
+@click.option('--num-latents', type=int, help='Number of latents to use for clustering; not recommended to change', default=60000, show_default=True)
+@click.option('--num-clusters', type=click.Choice(['32', '64', '128']), help='Number of cluster centroids to find', default='64', show_default=True)
+@click.option('--anchor-latent-space', '-anchor', is_flag=True, help='Anchor the latent space to w_avg to stabilize the video')
+# Extra parameters
+@click.option('--plot-pca', '-pca', is_flag=True, help='Plot and save the PCA of the disentangled latent space W')
+@click.option('--dim-pca', '-dim', type=click.IntRange(min=2, max=3), help='Number of dimensions to use for the PCA', default=3, show_default=True)
+@click.option('--verbose', type=bool, help='Verbose mode for KMeans (during centroids calculation)', show_default=True, default=False)
+@click.option('--outdir', type=click.Path(file_okay=False), help='Directory path to save the results', default=os.path.join(os.getcwd(), 'out', 'clusters'), show_default=True, metavar='DIR')
+@click.option('--description', '-desc', type=str, help='Description name for the directory path to save results', default='pure_centroids', show_default=True)
+def get_centroids(
+        ctx: click.Context,
+        network_pkl: str,
+        device: Optional[str],
+        cfg: Optional[str],
+        seed: Optional[int],
+        num_latents: Optional[int],
+        num_clusters: Optional[str],
+        anchor_latent_space: Optional[bool],
+        plot_pca: Optional[bool],
+        dim_pca: Optional[int],
+        verbose: Optional[bool],
+        outdir: Union[str, os.PathLike],
+        description: Optional[str]
+):
+    """Find the cluster centers in the latent space of the selected model"""
+    device = torch.device('cuda') if torch.cuda.is_available() and device == 'cuda' else torch.device('cpu')
 
-w_scaled = scaler.transform(w.cpu())
+    # Load the network
+    G = gen_utils.load_network('G_ema', network_pkl, cfg, device)
 
-kmeans = KMeans(n_clusters=num_clusters, random_state=0, init='random', verbose=1).fit(w_scaled)
+    # Setup for using CPU
+    if device.type == 'cpu':
+        gen_utils.use_cpu(G)
 
-w_avg_multi = torch.from_numpy(scaler.inverse_transform(kmeans.cluster_centers_)).to(device)  # a NumPy array :D
+    # Stabilize/anchor the latent space
+    if anchor_latent_space:
+        gen_utils.anchor_latent_space(G)
 
-fixed_w = gen_utils.get_w_from_seed(G, device, 0, 1.0)
-fixed_img = gen_utils.w_to_img(G, fixed_w)[0]
-# PIL.Image.fromarray(fixed_img, 'RGB').save(os.path.join(run_dir, 'pure_dlatent.jpg'))
-np.save(os.path.join(run_dir, 'pure_dlatent.npy'), fixed_w.unsqueeze(0).cpu().numpy())
+    desc = f'multimodal-truncation-{num_clusters}clusters'
+    desc = f'{desc}-{description}' if len(description) != 0 else desc
+    # Create the run dir with the given name description
+    run_dir = gen_utils.make_run_dir(outdir, desc)
 
-fixed_w_truncated = G.mapping.w_avg + (fixed_w - G.mapping.w_avg) * 0.5
-fixed_img_truncated = gen_utils.w_to_img(G, fixed_w_truncated)[0]
-# PIL.Image.fromarray(fixed_img_truncated, 'RGB').save(os.path.join(run_dir, 'truncated_dlatent.jpg'))
-np.save(os.path.join(run_dir, 'truncated_dlatent.npy'), fixed_w_truncated.unsqueeze(0).cpu().numpy())
+    print('Generating all the latents...')
+    z = torch.from_numpy(np.random.RandomState(seed).randn(num_latents, G.z_dim)).to(device)
+    w = G.mapping(z, None)[:, 0, :]
 
-global_w_avg = gen_utils.get_w_from_seed(G, device, 0, 0.0)
-global_avg_img = gen_utils.w_to_img(G, global_w_avg)[0]
-# PIL.Image.fromarray(global_avg_img, 'RGB').save(os.path.join(run_dir, 'global_w_avg.jpg'))
-np.save(os.path.join(run_dir, 'global_w_avg.npy'), global_w_avg.unsqueeze(0).cpu().numpy())
+    # Get the centroids
+    print('Finding the cluster centroids. Patience...')
+    scaler = StandardScaler()
+    scaler.fit(w.cpu())
 
-PIL.Image.fromarray(gen_utils.create_image_grid(np.array([fixed_img, global_avg_img, fixed_img_truncated]), (3, 1)), 'RGB').save(os.path.join(run_dir, 'comparison_global_mean.jpg'))
+    # Scale the dlatents and perform KMeans with the selected number of clusters
+    w_scaled = scaler.transform(w.cpu())
+    kmeans = KMeans(n_clusters=int(num_clusters), random_state=0, init='random', verbose=int(verbose)).fit(w_scaled)
 
-truncated_centroids_imgs = []
-pure_centroids_imgs = []
+    # Get the centroids and inverse transform them to the original space
+    w_avg_multi = torch.from_numpy(scaler.inverse_transform(kmeans.cluster_centers_)).to(device)
 
-for idx, w_avg in enumerate(w_avg_multi):
-    new_w = w_avg + (fixed_w - w_avg) * 0.5
-    new_w_img = gen_utils.w_to_img(G, new_w)[0]
-    truncated_centroids_imgs.append(new_w_img)
-    # PIL.Image.fromarray(new_w_img, 'RGB').save(os.path.join(run_dir, f'centroid_{idx+1:03d}-{num_clusters}clusters.jpg'))
+    print('Success! Saving the centroids...')
+    for idx, w_avg in enumerate(w_avg_multi):
+        w_avg = torch.tile(w_avg, (1, G.mapping.num_ws, 1))
+        img = gen_utils.w_to_img(G, w_avg)[0]
+        # Save image and dlatent/new centroid
+        PIL.Image.fromarray(img, 'RGB').save(os.path.join(run_dir, f'pure_centroid_no{idx+1:03d}-{num_clusters}clusters.jpg'))
+        np.save(os.path.join(run_dir, f'centroid_{idx+1:03d}-{num_clusters}clusters.npy'), w_avg.unsqueeze(0).cpu().numpy())
 
-    w_avg = torch.tile(w_avg, (1, G.mapping.num_ws, 1))
-    img = gen_utils.w_to_img(G, w_avg)[0]
-    pure_centroids_imgs.append(img)
-    # PIL.Image.fromarray(img, 'RGB').save(os.path.join(run_dir, f'pure_centroid_{idx+1:03d}-{num_clusters}clusters.jpg'))
-    np.save(os.path.join(run_dir, f'centroid_{idx+1:03d}.npy'), w_avg.unsqueeze(0).cpu().numpy())
+    # Save the configuration used
+    ctx.obj = {
+        'network_pkl': network_pkl,
+        'centroids_options': {
+            'seed': seed,
+            'num_latents': num_latents,
+            'num_clusters': num_clusters,
+            'anchor_latent_space': anchor_latent_space},
+        'extra_parameters': {
+            'outdir': run_dir,
+            'description': description}
+    }
+    # Save the run configuration
+    gen_utils.save_config(ctx=ctx, run_dir=run_dir)
 
-# Save grids
-PIL.Image.fromarray(gen_utils.create_image_grid(np.array(truncated_centroids_imgs)), 'RGB').save(os.path.join(run_dir, 'truncated_centroids.jpg'))
-PIL.Image.fromarray(gen_utils.create_image_grid(np.array(pure_centroids_imgs)), 'RGB').save(os.path.join(run_dir, 'pure_centroids.jpg'))
+    if plot_pca:
+        print('Plotting the PCA of the disentangled latent space...')
+        import matplotlib.pyplot as plt
+        from sklearn.decomposition import PCA
 
-if False:
-    # Try only with the GPU-based KMeans
-    inertia = []
+        pca =PCA(n_components=3)
+        fit_pca = pca.fit(w_scaled)
+        fit_pca = pca.fit_transform(w_scaled)
+        kmeans_pca = KMeans(n_clusters=int(num_clusters), random_state=0, verbose=0, init='random').fit_predict(fit_pca)
 
-    print('Getting wonky...')
-    for k in range(1, 128):
-        k_means = KMeans(n_clusters=k, init='random', random_state=0).fit(w_scaled)
-        inertia.append(k_means.inertia_)
+        fig = plt.figure(figsize=(20, 10))
+        ax = fig.add_subplot(111, projection='3d' if dim_pca == 3 else None)
+        axes = fit_pca[:, 0], fit_pca[:, 1], fit_pca[:, 2] if dim_pca == 3 else fit_pca[:, 0], fit_pca[:, 1]
+        ax.scatter(*axes, c=kmeans_pca, cmap='inferno', edgecolor='k', s=40, alpha=0.5)
+        ax.set_title(r"$| \mathcal{W} | \rightarrow $" + f'{dim_pca}')
+        ax.axis('off')
+        # save plot
+        plt.savefig(os.path.join(run_dir, f'pca_centroids_{num_clusters}clusters.png'))
 
-    import matplotlib.pyplot as plt
+    print('Done!')
 
-    plt.figure(figsize=(12, 9))
-    plt.plot(range(1, 128), inertia)
-    plt.xlabel('Number of clusters')
-    plt.ylabel('Inertia')
-    plt.savefig(os.path.join(run_dir, 'inertia.jpg'), bbox_inches='tight')
-    plt.close()
+
+# ----------------------------------------------------------------------------
+
+
+if __name__ == '__main__':
+    main()
+
+
+# ----------------------------------------------------------------------------
