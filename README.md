@@ -158,7 +158,8 @@ This repository adds/has the following changes (not yet the complete list):
     * Added the rest of the affine transformations
     * Added widget for class-conditional models (***TODO:*** mix classes with continuous values for `cls`!)
 * ***General model and code additions***
-    * [Multi-modal truncation trick](https://arxiv.org/abs/2202.12211): find the different clusters in your model and use the closest one to your dlatent, in order to increase the fidelity (TODO: finish skeleton implementation)
+    * [Multi-modal truncation trick](https://arxiv.org/abs/2202.12211): find the different clusters in your model and use the closest one to your dlatent, in order to increase the fidelity
+      * Usage: Run `python multimodal_truncation.py get-centroids --network=<path_to_model>` to use default values; for extra options, run `python multimodal_truncation.py get-centroids --help`
     * StyleGAN3: anchor the latent space for easier to follow interpolations (thanks to [Rivers Have Wings](https://github.com/crowsonkb) and [nshepperd](https://github.com/nshepperd)).
     * Use CPU instead of GPU if desired (not recommended, but perfectly fine for generating images, whenever the custom CUDA kernels fail to compile).
     * Add missing dependencies and channels so that the [`conda`](https://docs.conda.io/en/latest/) environment is correctly setup in Windows 
@@ -172,7 +173,6 @@ This repository adds/has the following changes (not yet the complete list):
   * Define a [custom Generator](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/59e05bb115c1c7d0de56be0523754076c2b7ee83/legacy.py#L131) in `legacy.py` to modify the output size
     * Related: the [multi-latent](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/main/training/stylegan2_multi.py), i.e., the one from [@eps696](https://github.com/eps696/stylegan2)
   * Add [Top-K training](https://arxiv.org/abs/2002.06224) as done [here](https://github.com/dvschultz/stylegan2-ada/blob/8f4ab24f494483542d31bf10f4fdb0005dc62739/train.py#L272) and [here](https://github.com/dvschultz/stylegan2-ada-pytorch/blob/59e05bb115c1c7d0de56be0523754076c2b7ee83/training/loss.py#L79)
-  * Multi-modal truncation trick: finish skeleton code, add automatic selection of centroid (w.r.t. L2 or LPIPS; user-selected)
   * Add panorama/SinGAN/feature interpolation from [StyleGAN of All Trades](https://arxiv.org/abs/2111.01619)
   * [PTI](https://github.com/danielroich/PTI) for better inversion
   * [Better sampling](https://arxiv.org/abs/2110.08009)

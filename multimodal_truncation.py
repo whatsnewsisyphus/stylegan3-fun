@@ -31,14 +31,14 @@ def main():
 @main.command(name='get-centroids')
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename: can be URL, local file, or the name of the model in torch_utils.gen_utils.resume_specs', required=True)
-@click.option('--device', help='Device to use for image generation; using the CPU is slower than the GPU', type=click.Choice(['cpu', 'cuda']), default='cuda', show_default=True)
 @click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
+@click.option('--device', help='Device to use for image generation; using the CPU is slower than the GPU', type=click.Choice(['cpu', 'cuda']), default='cuda', show_default=True)
 # Centroids options
 @click.option('--seed', type=int, help='Random seed to use', default=0, show_default=True)
 @click.option('--num-latents', type=int, help='Number of latents to use for clustering; not recommended to change', default=60000, show_default=True)
 @click.option('--num-clusters', type=click.Choice(['32', '64', '128']), help='Number of cluster centroids to find', default='64', show_default=True)
-@click.option('--anchor-latent-space', '-anchor', is_flag=True, help='Anchor the latent space to w_avg to stabilize the video')
 # Extra parameters
+@click.option('--anchor-latent-space', '-anchor', is_flag=True, help='Anchor the latent space to w_avg to stabilize the video')
 @click.option('--plot-pca', '-pca', is_flag=True, help='Plot and save the PCA of the disentangled latent space W')
 @click.option('--dim-pca', '-dim', type=click.IntRange(min=2, max=3), help='Number of dimensions to use for the PCA', default=3, show_default=True)
 @click.option('--verbose', type=bool, help='Verbose mode for KMeans (during centroids calculation)', show_default=True, default=False)
@@ -47,8 +47,8 @@ def main():
 def get_centroids(
         ctx: click.Context,
         network_pkl: str,
-        device: Optional[str],
         cfg: Optional[str],
+        device: Optional[str],
         seed: Optional[int],
         num_latents: Optional[int],
         num_clusters: Optional[str],
@@ -104,13 +104,15 @@ def get_centroids(
 
     # Save the configuration used
     ctx.obj = {
-        'network_pkl': network_pkl,
+        'model_options': {
+            'network_pkl': network_pkl,
+            'model_configuration': cfg},
         'centroids_options': {
             'seed': seed,
             'num_latents': num_latents,
-            'num_clusters': num_clusters,
-            'anchor_latent_space': anchor_latent_space},
+            'num_clusters': num_clusters},
         'extra_parameters': {
+            'anchor_latent_space': anchor_latent_space,
             'outdir': run_dir,
             'description': description}
     }
@@ -122,7 +124,7 @@ def get_centroids(
         import matplotlib.pyplot as plt
         from sklearn.decomposition import PCA
 
-        pca =PCA(n_components=3)
+        pca = PCA(n_components=dim_pca)
         fit_pca = pca.fit(w_scaled)
         fit_pca = pca.fit_transform(w_scaled)
         kmeans_pca = KMeans(n_clusters=int(num_clusters), random_state=0, verbose=0, init='random').fit_predict(fit_pca)
@@ -133,8 +135,7 @@ def get_centroids(
         ax.scatter(*axes, c=kmeans_pca, cmap='inferno', edgecolor='k', s=40, alpha=0.5)
         ax.set_title(r"$| \mathcal{W} | \rightarrow $" + f'{dim_pca}')
         ax.axis('off')
-        # save plot
-        plt.savefig(os.path.join(run_dir, f'pca_centroids_{num_clusters}clusters.png'))
+        plt.savefig(os.path.join(run_dir, f'pca_{dim_pca}dim_{num_clusters}clusters.png'))
 
     print('Done!')
 
