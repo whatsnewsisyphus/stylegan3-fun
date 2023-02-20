@@ -270,7 +270,7 @@ def main(**kwargs):
         c.loss_kwargs.style_mixing_prob = 0 # Disable style mixing regularization (default)
 
         # Double Generator capacity
-        c.G_kwargs.synthesis_kwargs.extended_sgan2 = True
+        c.G_kwargs.extended_sgan2 = True
         c.G_kwargs.channel_base = 32 << 10  # (default already)
         c.G_kwargs.extended_sgan2 = True  # Double the number of feature maps
         c.G_kwargs.channel_max = 1024
