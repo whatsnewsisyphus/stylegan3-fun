@@ -34,7 +34,7 @@ def main():
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename: can be URL, local file, or the name of the model in torch_utils.gen_utils.resume_specs', required=True)
 @click.option('--device', help='Device to use for image generation; using the CPU is slower than the GPU', type=click.Choice(['cpu', 'cuda']), default='cuda', show_default=True)
-@click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
+@click.option('--cfg', type=click.Choice(gen_utils.available_cfgs), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
 # Synthesis options (feed a list of seeds or give the projected w to synthesize)
 @click.option('--seeds', type=gen_utils.num_range, help='List of random seeds')
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
@@ -283,7 +283,7 @@ def generate_images(
 @main.command(name='random-video')
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-@click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
+@click.option('--cfg', type=click.Choice(gen_utils.available_cfgs), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
 # Synthesis options
 @click.option('--seeds', type=gen_utils.num_range, help='List of random seeds', required=True)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
@@ -556,7 +556,7 @@ def random_interpolation_video(
 @main.command('circular-video')
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-@click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
+@click.option('--cfg', type=click.Choice(gen_utils.available_cfgs), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
 # Synthesis options
 @click.option('--seed', type=int, help='Random seed', required=True)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)

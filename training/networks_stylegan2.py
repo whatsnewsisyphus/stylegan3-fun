@@ -498,6 +498,7 @@ class SynthesisNetwork(torch.nn.Module):
         channel_base    = 32768,    # Overall multiplier for the number of channels.
         channel_max     = 512,      # Maximum number of channels in any layer.
         num_fp16_res    = 4,        # Use FP16 for the N highest resolutions.
+        extended_sgan2  = False,    # Use extended architecture for SGAN2 from @aydao
         **block_kwargs,             # Arguments for SynthesisBlock.
     ):
         assert img_resolution >= 4 and img_resolution & (img_resolution - 1) == 0
@@ -508,7 +509,10 @@ class SynthesisNetwork(torch.nn.Module):
         self.img_channels = img_channels
         self.num_fp16_res = num_fp16_res
         self.block_resolutions = [2 ** i for i in range(2, self.img_resolution_log2 + 1)]
-        channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
+        if extended_sgan2:
+            channels_dict = {res: min(2 * channel_base // res, channel_max) for res in self.block_resolutions}
+        else:
+            channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
         self.num_ws = 0

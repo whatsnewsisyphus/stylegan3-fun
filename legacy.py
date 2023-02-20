@@ -147,7 +147,6 @@ def convert_tf_generator(tf_G):
             w_avg_beta      = kwarg('w_avg_beta',           0.995,  none=1),
         ),
     )
-
     # Check for unknown kwargs.
     kwarg('truncation_psi')
     kwarg('truncation_cutoff')
@@ -156,12 +155,24 @@ def convert_tf_generator(tf_G):
     kwarg('conditioning')
     kwarg('fused_modconv')
     kwarg('randomize_noise')  # PR #173 by @cobanov, for StyleGAN2 models/TF 1.15
+    kwarg('resolution_h')  # For transferring from --network=anime1024 --cfg=stylegan2-ext
+    kwarg('resolution_w')  # For transferring from --network=anime1024 --cfg=stylegan2-ext
     unknown_kwargs = list(set(tf_kwargs.keys()) - known_kwargs)
     if len(unknown_kwargs) > 0:
         raise ValueError('Unknown TensorFlow kwarg', unknown_kwargs[0])
 
     # Collect params.
     tf_params = _collect_tf_params(tf_G)
+
+    # Add changes from --cfg=stylegan2-ext; currently can't think of another way to do this
+    if 'resolution_h' and 'resolution_w' in tf_kwargs:
+        kwargs.channel_max = 1024
+        kwargs.w_dim = 1024
+        kwargs.z_dim = 1024
+        kwargs.mapping_kwargs.layer_features = 1024
+        kwargs.mapping_kwargs.num_layers = 4
+        kwargs.extended_sgan2 = True
+
     for name, value in list(tf_params.items()):
         match = re.fullmatch(r'ToRGB_lod(\d+)/(.*)', name)
         if match:
@@ -255,9 +266,15 @@ def convert_tf_discriminator(tf_D):
     # Check for unknown kwargs.
     kwarg('structure')
     kwarg('conditioning')
+    kwarg('resolution_h')  # For transferring from --network=anime1024 --cfg=stylegan2-ext
+    kwarg('resolution_w')  # For transferring from --network=anime1024 --cfg=stylegan2-ext
     unknown_kwargs = list(set(tf_kwargs.keys()) - known_kwargs)
     if len(unknown_kwargs) > 0:
         raise ValueError('Unknown TensorFlow kwarg', unknown_kwargs[0])
+
+    # Add changes from --cfg=stylegan2-ext.  (I really can't think of another way tbh)
+    if 'resolution_h' and 'resolution_w' in tf_kwargs:
+        kwargs.epilogue_kwargs.mbstd_num_channels = 4
 
     # Collect params.
     tf_params = _collect_tf_params(tf_D)

@@ -23,6 +23,12 @@ channels_dict = {1: 'L', 3: 'RGB', 4: 'RGBA'}
 # ----------------------------------------------------------------------------
 
 
+available_cfgs = ['stylegan2', 'stylegan2-ext', 'stylegan3-t', 'stylegan3-r']
+
+
+# ----------------------------------------------------------------------------
+
+
 def create_image_grid(images: np.ndarray, grid_size: Optional[Tuple[int, int]] = None):
     """
     Create a grid with the fed images
@@ -543,6 +549,10 @@ resume_specs = {
             'sdgiraffes512': 'https://storage.googleapis.com/self-distilled-stylegan/giraffes_512_pytorch.pkl',
             'sdparrots512':  'https://storage.googleapis.com/self-distilled-stylegan/parrots_512_pytorch.pkl'
 
+        },
+        # For StyleGAN2 extended (--cfg=styelgan2-ext)
+        'stylegan2-ext': {
+            'anime512': 'https://drive.google.com/u/0/uc?export=download&confirm=zFoN&id=1A-E_E32WAtTHRlOzjhhYhyyBDXLJN9_H'  # Thanks to @aydao
         },
         # For StyleGAN3 config-r models (--cfg=stylegan3-r)
         'stylegan3-r': {
