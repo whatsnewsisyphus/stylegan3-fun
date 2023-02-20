@@ -37,7 +37,9 @@ This repository adds/has the following changes (not yet the complete list):
 * ***Training***
   * Add `--cfg=stylegan2-ext`, which uses @aydao's extended modifications for handling large and diverse datasets. 
     * A good explanation is found in Gwern's blog [here](https://gwern.net/face#extended-stylegan2-danbooru2019-aydao)
-    * Note: ***This is extremely experimental and still incomplete!*** Do not use it unless you want to test another possible StyleGAN2 configuration!
+    * If you wish to fine-tune from @aydao's Anime model, use `--cfg=stylegan2-ext --resume=anime512` when running `train.py`
+    * Note: ***This is an extremely experimental configuration!*** The `.pkl` files will be ~1.1Gb each and training will slow down
+      significantly. Use at your own risk!
   * `--mirrory`: Added vertical mirroring for doubling the dataset size (quadrupling if `--mirror` is used; make sure your dataset has either or both 
     of these symmetries in order for it to make sense to use them)
   * `--gamma`: If no R1 regularization is provided, the heuristic formula from [StyleGAN](https://github.com/NVlabs/stylegan2) will be used.
