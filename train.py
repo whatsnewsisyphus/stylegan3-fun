@@ -192,7 +192,7 @@ def main(**kwargs):
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
-    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
+    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)  # TODO: Use ComplexSGD: https://arxiv.org/abs/2102.08431
@@ -272,13 +272,15 @@ def main(**kwargs):
         # Double Generator capacity
         c.G_kwargs.synthesis_kwargs.extended_sgan2 = True
         c.G_kwargs.channel_base = 32 << 10  # (default already)
+        c.G_kwargs.extended_sgan2 = True  # Double the number of feature maps
         c.G_kwargs.channel_max = 1024
-        c.D_kwargs.epilogue_kwargs.mbstd_group_size = 4
+        c.D_kwargs.epilogue_kwargs.mbstd_num_channels = 4
 
         # Mapping layer
+        c.G_kwargs.z_dim = 1024
+        c.G_kwargs.w_dim = 1024
         c.G_kwargs.mapping_kwargs.num_layers = 4  # TODO: test with a higher number later on
-        c.G_kwargs.mapping_kwargs.w_dim = 1024  # TODO: test with a wider mapping network later on
-        c.G_kwargs.mapping_kwargs.z_dim = 1024
+        c.G_kwargs.mapping_kwargs.layer_features = 1024  # TODO: test with a wider mapping network later on
 
         # TODO: Enable top-k training
         # TODO: try different values of c.ema_kimg

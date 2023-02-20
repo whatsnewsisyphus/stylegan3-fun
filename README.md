@@ -101,6 +101,8 @@ This repository adds/has the following changes (not yet the complete list):
          * `sdlions512` (Self-Distilled StyleGAN models)
          * `sdgiraffes512` (Self-Distilled StyleGAN models)
          * `sdparrots512` (Self-Distilled StyleGAN models)
+      2. Extended StyleGAN2 config from @aydao: set `--cfg=stylegan2-ext`
+         * `anime512` (thanks to @aydao; writeup by @gwern: https://gwern.net/Faces#extended-stylegan2-danbooru2019-aydao)
         </details>
     
         <details>
