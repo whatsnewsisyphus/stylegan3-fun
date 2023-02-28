@@ -156,8 +156,10 @@ This repository adds/has the following changes (not yet the complete list):
     * [Project into $\mathcal{W}+$](https://arxiv.org/abs/1904.03189)
     * Additional losses to use for better projection (e.g., using VGG16 or [CLIP](https://github.com/openai/CLIP))
 * ***[Discriminator Synthesis](https://arxiv.org/abs/2111.02175)*** (official code)
-    * Generate a static image or a [video](https://youtu.be/hEJKWL2VQTE) with a feedback loop
-    * Start from a random image (`random` or `perlin`, using [Mathieu Duchesneau's implementation](https://github.com/duchesneaumathieu/pyperlin)) or from an existing one
+    * Generate a static image (`python discriminator_synthesis.py dream --help`) or a [video](https://youtu.be/hEJKWL2VQTE) with a feedback loop (`python discriminator_synthesis.py dream-zoom --help`,
+     `python discriminator_synthesis.py channel-zoom --help`, or `python discriminator_synthesis.py interp --help`)
+    * Start from a random image (`random` for noise or `perlin` for 2D fractal Perlin noise, using 
+      [Mathieu Duchesneau's implementation](https://github.com/duchesneaumathieu/pyperlin)) or from an existing one
 * ***Expansion on GUI/`visualizer.py`***
     * Added the rest of the affine transformations
     * Added widget for class-conditional models (***TODO:*** mix classes with continuous values for `cls`!)

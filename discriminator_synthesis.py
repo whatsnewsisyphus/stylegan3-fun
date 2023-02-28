@@ -19,6 +19,7 @@ import os
 import click
 from typing import Union, Tuple, Optional, List
 from tqdm import tqdm
+import re
 
 from torch_utils import gen_utils
 from network_features import DiscriminatorFeatures
@@ -641,7 +642,7 @@ def discriminator_dream_zoom(
                                        rotation_deg=rotation_deg, translate_x=translate_x, translate_y=translate_y)
         # Extract deep dream image
         dreamed_image = deep_dream(image, model, model_resolution, layers=layers, seed=seed, normed=norm_model_layers,
-                                   sqrt_normed=sqrt_norm_model_layers, iterations=iterations,
+                                   sqrt_normed=sqrt_norm_model_layers, iterations=iterations, channels=channels,
                                    lr=learning_rate, octave_scale=octave_scale, num_octaves=num_octaves,
                                    unzoom_octave=unzoom_octave, disable_inner_tqdm=True)
 
@@ -669,13 +670,191 @@ def discriminator_dream_zoom(
 
 # ----------------------------------------------------------------------------
 
-@main.command(name='channel-zoom')
+@main.command(name='channel-zoom', help='Dream zoom using only the specified channels in the selected layer')
 @click.pass_context
-@click.option('--network-pkl', help='Network pickle filename', required=True, type=click.Path(exists=True))
-def channel_zoom():
+@click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
+@click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
+# Synthesis options
+@click.option('--seed', type=int, help='Random seed to use', default=0, show_default=True)
+@click.option('--random-image-noise', '-noise', 'image_noise', type=click.Choice(['random', 'perlin']), default='random', show_default=True)
+@click.option('--starting-image', type=str, help='Path to image to start from', default=None)
+@click.option('--convert-to-grayscale', '-grayscale', is_flag=True, help='Add flag to grayscale the initial image')
+@click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)', default=None)
+@click.option('--lr', 'learning_rate', type=float, help='Learning rate', default=5e-3, show_default=True)
+@click.option('--iterations', '-it', type=click.IntRange(min=1), help='Number of gradient ascent steps per octave', default=10, show_default=True)
+# Layer options
+@click.option('--layer', type=str, help='Layers of the Discriminator to use as the features.', default='b8_conv0', show_default=True)
+@click.option('--normed', 'norm_model_layers', is_flag=True, help='Add flag to divide the features of each layer of D by its number of elements')
+@click.option('--sqrt-normed', 'sqrt_norm_model_layers', is_flag=True, help='Add flag to divide the features of each layer of D by the square root of its number of elements')
+# Octaves options
+@click.option('--num-octaves', type=click.IntRange(min=1), help='Number of octaves', default=5, show_default=True)
+@click.option('--octave-scale', type=float, help='Image scale between octaves', default=1.4, show_default=True)
+@click.option('--unzoom-octave', type=bool, help='Set to True for the octaves to be unzoomed (this will be slower)', default=False, show_default=True)
+# Individual frame manipulation options
+@click.option('--pixel-zoom', '-zoom', type=int, help='How many pixels to zoom per step (positive for zoom in, negative for zoom out, padded with black)', default=2, show_default=True)
+@click.option('--rotation-deg', '-rot', type=float, help='Rotate image counter-clockwise per frame (padded with black)', default=0.0, show_default=True)
+@click.option('--translate-x', '-tx', type=float, help='Translate the image in the horizontal axis per frame (from left to right, padded with black)', default=0.0, show_default=True)
+@click.option('--translate-y', '-ty', type=float, help='Translate the image in the vertical axis per frame (from top to bottom, padded with black)', default=0.0, show_default=True)
+# Video options
+@click.option('--frames-per-channel', type=click.IntRange(min=1), help='Number of frames per channel', default=1, show_default=True)
+@click.option('--fps', type=gen_utils.parse_fps, help='FPS for the mp4 video of optimization progress (if saved)', default=25, show_default=True)
+@click.option('--reverse-video', is_flag=True, help='Add flag to reverse the generated video')
+@click.option('--include-starting-image', type=bool, help='Include the starting image in the final video', default=True, show_default=True)
+# Extra parameters for saving the results
+@click.option('--outdir', type=click.Path(file_okay=False), help='Directory path to save the results', default=os.path.join(os.getcwd(), 'out', 'discriminator_synthesis'), show_default=True, metavar='DIR')
+@click.option('--description', '-desc', type=str, help='Additional description name for the directory path to save results', default='', show_default=True)
+def channel_zoom(
+        ctx: click.Context,
+        network_pkl: Union[str, os.PathLike],
+        cfg: Optional[str],
+        seed: int,
+        image_noise: Optional[str],
+        starting_image: Optional[Union[str, os.PathLike]],
+        convert_to_grayscale: bool,
+        class_idx: Optional[int],  # TODO: conditional model
+        learning_rate: float,
+        iterations: int,
+        layer: str,
+        norm_model_layers: Optional[bool],
+        sqrt_norm_model_layers: Optional[bool],
+        num_octaves: int,
+        octave_scale: float,
+        unzoom_octave: Optional[bool],
+        pixel_zoom: int,
+        rotation_deg: float,
+        translate_x: int,
+        translate_y: int,
+        frames_per_channel: int,
+        fps: int,
+        reverse_video: bool,
+        include_starting_image: bool,
+        outdir: Union[str, os.PathLike],
+        description: str,
+):
     """Zoom in using all the channels of a network (or a specified layer)"""
-    # TODO: Implement this
-    pass
+    # Set up device
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    # Load Discriminator
+    D = gen_utils.load_network('D', network_pkl, cfg, device)
+
+    # Get the model resolution (for resizing the starting image if needed)
+    model_resolution = D.img_resolution
+    zoom_size = model_resolution - 2 * pixel_zoom
+
+    if 'use_all' in layer:
+        ctx.fail('Cannot use "use_all" with this command. Please specify the layers you want to use.')
+    else:
+        # Parse the layers given by the user and leave only those available by the model
+        available_layers = get_available_layers(max_resolution=model_resolution)
+        assert layer in available_layers, f'Layer {layer} not available. Available layers: {available_layers}'
+        layers = [layer]
+
+    # We will use the features of the Discriminator, on the layer specified by the user
+    model = DiscriminatorFeatures(D).requires_grad_(False).to(device)
+
+    # Get the image and image name
+    image, starting_image = get_image(seed=seed, image_noise=image_noise,
+                                      starting_image=starting_image,
+                                      image_size=model_resolution,
+                                      convert_to_grayscale=convert_to_grayscale)
+
+    # Make the run dir in the specified output directory
+    desc = 'discriminator-channel-zoom'
+    desc = f'{desc}-{description}' if len(description) != 0 else desc
+    run_dir = gen_utils.make_run_dir(outdir, desc)
+
+    # Finally, let's get the number of channels in the selected layer
+    channels_dict = {res: min(D.init_kwargs.channel_base // res,
+                              D.init_kwargs.channel_max) for res in D.block_resolutions + [4]}
+    # Get the dimension of the block from the selected layer (e.g., from 'b128_conv0' get '128')
+    block_resolution = re.search(r'b(\d+)_', layer).group(1)
+    total_channels = channels_dict[int(block_resolution)]
+    # Make a list of all the channels, each repeated frames_per_channel
+    channels = np.repeat(np.arange(total_channels), frames_per_channel)
+
+    num_frames = int(np.rint(total_channels * frames_per_channel))  # Number of frames for the video
+    n_digits = int(np.log10(num_frames)) + 1  # Number of digits for naming each frame
+
+    # Save the starting image
+    starting_image_name = f'dreamed_{0:0{n_digits}d}.jpg' if include_starting_image else 'starting_image.jpg'
+    image.save(os.path.join(run_dir, starting_image_name))
+
+    for idx, frame in enumerate(tqdm(range(num_frames), desc='Dreaming...', unit='frame')):
+        # Zoom in after the first frame
+        if idx > 0:
+            image = crop_resize_rotate(image, crop_size=zoom_size, new_size=model_resolution,
+                                       rotation_deg=rotation_deg, translate_x=translate_x, translate_y=translate_y)
+        # Extract deep dream image
+        dreamed_image = deep_dream(image, model, model_resolution, layers=layers, seed=seed, normed=norm_model_layers,
+                                   sqrt_normed=sqrt_norm_model_layers, iterations=iterations, channels=channels[idx:idx + 1],
+                                   lr=learning_rate, octave_scale=octave_scale, num_octaves=num_octaves,
+                                   unzoom_octave=unzoom_octave, disable_inner_tqdm=True)
+
+        # Save the resulting image and initial image
+        filename = f'dreamed_{idx + 1:0{n_digits}d}.jpg'
+        Image.fromarray(dreamed_image, 'RGB').save(os.path.join(run_dir, filename))
+
+        # Now, the dreamed image is the starting image
+        image = Image.fromarray(dreamed_image, 'RGB')
+
+    # Save the final video
+    print('Saving video...')
+    ffmpeg_command = r'/usr/bin/ffmpeg' if os.name != 'nt' else r'C:\\Ffmpeg\\bin\\ffmpeg.exe'
+    stream = ffmpeg.input(os.path.join(run_dir, f'dreamed_%0{n_digits}d.jpg'), framerate=fps)
+    stream = ffmpeg.output(stream, os.path.join(run_dir, 'channel-zoom.mp4'), crf=20, pix_fmt='yuv420p')
+    ffmpeg.run(stream, capture_stdout=True, capture_stderr=True, cmd=ffmpeg_command)
+
+    # Save the reversed video apart from the original one, so the user can compare both
+    if reverse_video:
+        stream = ffmpeg.input(os.path.join(run_dir, 'channel-zoom.mp4'))
+        stream = stream.video.filter('reverse')
+        stream = ffmpeg.output(stream, os.path.join(run_dir, 'channel-zoom_reversed.mp4'), crf=20, pix_fmt='yuv420p')
+        ffmpeg.run(stream, capture_stdout=True, capture_stderr=True)  # ibidem
+
+    # Save the configuration used
+    ctx.obj = {
+        'network_pkl': network_pkl,
+        'synthesis_options': {
+            'seed': seed,
+            'random_image_noise': image_noise,
+            'starting_image': starting_image,
+            'class_idx': class_idx,
+            'learning_rate': learning_rate,
+            'iterations': iterations
+        },
+        'layer_options': {
+            'layer': layer,
+            'channels': 'all',
+            'total_channels': total_channels,
+            'norm_model_layers': norm_model_layers,
+            'sqrt_norm_model_layers': sqrt_norm_model_layers
+        },
+        'octaves_options': {
+            'num_octaves': num_octaves,
+            'octave_scale': octave_scale,
+            'unzoom_octave': unzoom_octave
+        },
+        'frame_manipulation_options': {
+            'pixel_zoom': pixel_zoom,
+            'rotation_deg': rotation_deg,
+            'translate_x': translate_x,
+            'translate_y': translate_y,
+        },
+        'video_options': {
+            'fps': fps,
+            'frames_per_channel': frames_per_channel,
+            'reverse_video': reverse_video,
+            'include_starting_image': include_starting_image,
+        },
+        'extra_parameters': {
+            'outdir': run_dir,
+            'description': description
+        }
+    }
+    # Save the run configuration
+    gen_utils.save_config(ctx=ctx, run_dir=run_dir)
+
 
 # ----------------------------------------------------------------------------
 
