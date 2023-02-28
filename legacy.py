@@ -171,7 +171,7 @@ def convert_tf_generator(tf_G):
         kwargs.z_dim = 1024
         kwargs.mapping_kwargs.layer_features = 1024
         kwargs.mapping_kwargs.num_layers = 4
-        kwargs.extended_sgan2 = True
+        kwargs.channel_base *= 2
 
     for name, value in list(tf_params.items()):
         match = re.fullmatch(r'ToRGB_lod(\d+)/(.*)', name)

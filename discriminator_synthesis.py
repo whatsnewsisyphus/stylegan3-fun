@@ -654,18 +654,8 @@ def discriminator_dream_zoom(
         image = Image.fromarray(dreamed_image, 'RGB')
 
     # Save the final video
-    print('Saving video...')
-    ffmpeg_command = r'/usr/bin/ffmpeg' if os.name != 'nt' else r'C:\\Ffmpeg\\bin\\ffmpeg.exe'
-    stream = ffmpeg.input(os.path.join(run_dir, f'dreamed_%0{n_digits}d.jpg'), framerate=fps)
-    stream = ffmpeg.output(stream, os.path.join(run_dir, 'dream-zoom.mp4'), crf=20, pix_fmt='yuv420p')
-    ffmpeg.run(stream, capture_stdout=True, capture_stderr=True, cmd=ffmpeg_command)
-
-    # Save the reversed video apart from the original one, so the user can compare both
-    if reverse_video:
-        stream = ffmpeg.input(os.path.join(run_dir, 'dream-zoom.mp4'))
-        stream = stream.video.filter('reverse')
-        stream = ffmpeg.output(stream, os.path.join(run_dir, 'dream-zoom_reversed.mp4'), crf=20, pix_fmt='yuv420p')
-        ffmpeg.run(stream, capture_stdout=True, capture_stderr=True)  # ibidem
+    gen_utils.save_video_from_images(run_dir=run_dir, image_names=f'dreamed_%0{n_digits}d.jpg',
+                                     video_name='dream-zoom', fps=fps, reverse_video=reverse_video)
 
 
 # ----------------------------------------------------------------------------
@@ -765,8 +755,8 @@ def channel_zoom(
     run_dir = gen_utils.make_run_dir(outdir, desc)
 
     # Finally, let's get the number of channels in the selected layer
-    channels_dict = {res: min(D.init_kwargs.channel_base // res,
-                              D.init_kwargs.channel_max) for res in D.block_resolutions + [4]}
+    channels_dict = {res: D.get_submodule(f'b{res}.conv0').out_channels for res in D.block_resolutions}
+    channels_dict[4] = D.get_submodule('b4.conv').out_channels  # Last block has a different name
     # Get the dimension of the block from the selected layer (e.g., from 'b128_conv0' get '128')
     block_resolution = re.search(r'b(\d+)_', layer).group(1)
     total_channels = channels_dict[int(block_resolution)]
@@ -799,18 +789,8 @@ def channel_zoom(
         image = Image.fromarray(dreamed_image, 'RGB')
 
     # Save the final video
-    print('Saving video...')
-    ffmpeg_command = r'/usr/bin/ffmpeg' if os.name != 'nt' else r'C:\\Ffmpeg\\bin\\ffmpeg.exe'
-    stream = ffmpeg.input(os.path.join(run_dir, f'dreamed_%0{n_digits}d.jpg'), framerate=fps)
-    stream = ffmpeg.output(stream, os.path.join(run_dir, 'channel-zoom.mp4'), crf=20, pix_fmt='yuv420p')
-    ffmpeg.run(stream, capture_stdout=True, capture_stderr=True, cmd=ffmpeg_command)
-
-    # Save the reversed video apart from the original one, so the user can compare both
-    if reverse_video:
-        stream = ffmpeg.input(os.path.join(run_dir, 'channel-zoom.mp4'))
-        stream = stream.video.filter('reverse')
-        stream = ffmpeg.output(stream, os.path.join(run_dir, 'channel-zoom_reversed.mp4'), crf=20, pix_fmt='yuv420p')
-        ffmpeg.run(stream, capture_stdout=True, capture_stderr=True)  # ibidem
+    gen_utils.save_video_from_images(run_dir=run_dir, image_names=f'dreamed_%0{n_digits}d.jpg', video_name='channel-zoom',
+                                     fps=fps, reverse_video=reverse_video)
 
     # Save the configuration used
     ctx.obj = {

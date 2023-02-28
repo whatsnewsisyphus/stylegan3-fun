@@ -205,6 +205,42 @@ def parse_class(G, class_idx: int, ctx: click.Context) -> Union[int, type(None)]
 # ----------------------------------------------------------------------------
 
 
+def save_video_from_images(run_dir: str,
+                           image_names: str,
+                           video_name: str,
+                           fps: int = 30,
+                           reverse_video: bool = True,
+                           crf: int = 20,
+                           pix_fmt: str = 'yuv420p') -> None:
+    """ Save a .mp4 video from the images in the run_dir directory; the video can also be saved in reverse """
+    print('Saving video...')
+    try:
+        import ffmpeg
+    except ImportError:
+        raise ImportError('ffmpeg-python not found! Install it via "pip install ffmpeg-python"')
+    # Get the ffmpeg command for the current OS (not tested in MacOS!)
+    if os.name == 'nt':
+        ffmpeg_command = r'C:\\Ffmpeg\\bin\\ffmpeg.exe'
+    else:
+        # Get where is the ffmpeg command via `whereis ffmpeg` in the terminal
+        ffmpeg_command = os.popen('whereis ffmpeg').read().split(' ')[1:]
+        # Remove any ffprobe and ffplay commands
+        ffmpeg_command = [c for c in ffmpeg_command if 'ffprobe' not in c and 'ffplay' not in c]
+        # If there are more, just select the first one and remove the newline character
+        ffmpeg_command = ffmpeg_command[0].replace('\n', '')
+
+    stream = ffmpeg.input(os.path.join(run_dir, image_names), framerate=fps)
+    stream = ffmpeg.output(stream, os.path.join(run_dir, f'{video_name}.mp4'), crf=crf, pix_fmt=pix_fmt)
+    ffmpeg.run(stream, capture_stdout=True, capture_stderr=True, cmd=ffmpeg_command)
+
+    # Save the reversed video apart from the original one, so the user can compare both
+    if reverse_video:
+        stream = ffmpeg.input(os.path.join(run_dir, f'{video_name}.mp4'))
+        stream = stream.video.filter('reverse')
+        stream = ffmpeg.output(stream, os.path.join(run_dir, f'{video_name}_reversed.mp4'), crf=crf, pix_fmt=pix_fmt)
+        ffmpeg.run(stream, capture_stdout=True, capture_stderr=True)  # ibidem
+
+
 def compress_video(
         original_video: Union[str, os.PathLike],
         original_video_name: Union[str, os.PathLike],
