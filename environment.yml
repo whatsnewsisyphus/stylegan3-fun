@@ -10,8 +10,8 @@ dependencies:
   - click>=8.0
   - pillow=8.3.1
   - scipy=1.7.1
-  - pytorch>=1.9.1  # We can now use Pytorch 1.11!
-  - cudatoolkit=11.1  # Necessary to remove previous PR by @edstoica
+  - pytorch::pytorch=1.11  # We can now use Pytorch 1.11!
+  - nvidia::cudatoolkit=11.3  # Necessary to remove previous PR by @edstoica
   - requests=2.26.0
   - tqdm=4.62.2
   - ninja=1.10.2
@@ -26,9 +26,9 @@ dependencies:
     - pyperlin  # for Discriminator Synthesis
     - psutil  # PR #125 by @fastflair / #111 by @siddharthksah
     - tensorboard  # PR #125 by @fastflair
-    - torchvision  # For "Discriminator Synthesis" / discriminator_synthesis.py
+    - torchvision==0.12.0  # For "Discriminator Synthesis" / discriminator_synthesis.py
     - pyperlin  # For "Discriminator Synthesis" / discriminator_synthesis.py
-    - sklearn  # For "Self-Distilled StyleGAN" / multimodal_truncation.py
+    - scikit-learn  # For "Self-Distilled StyleGAN" / multimodal_truncation.py
     - moviepy==1.0.3
     - ffmpeg-python==0.2.0
     - scikit-video==1.1.11

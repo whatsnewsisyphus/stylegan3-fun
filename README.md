@@ -184,7 +184,7 @@ This repository adds/has the following changes (not yet the complete list):
   * [Better sampling](https://arxiv.org/abs/2110.08009)
   * [Add cross-model interpolation](https://twitter.com/arfafax/status/1297681537337446400?s=20&t=xspnTaLFTvd7y4krg8tkxA)
   * Blend different models (average checkpoints, copy weights, create initial network), as in @aydao's [StyleGAN2-Surgery](https://github.com/aydao/stylegan2-surgery)
-  * ***TODO:*** Add multi-crop for the dataset creation, as used in [Earth View](https://github.com/PDillis/earthview#multi-crop---data_augmentpy).
+  * Add multi-crop for the dataset creation, as used in [Earth View](https://github.com/PDillis/earthview#multi-crop---data_augmentpy).
   * Make it easy to download pretrained models from Drive, otherwise a lot of models can't be used with `dnnlib.util.open_url`
     (e.g., [StyleGAN-Human](https://github.com/stylegan-human/StyleGAN-Human) models)
   * Finish documentation for better user experience, add videos/images, code samples, visuals...
