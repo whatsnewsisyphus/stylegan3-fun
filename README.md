@@ -40,6 +40,10 @@ This repository adds/has the following changes (not yet the complete list):
     * If you wish to fine-tune from @aydao's Anime model, use `--cfg=stylegan2-ext --resume=anime512` when running `train.py`
     * Note: ***This is an extremely experimental configuration!*** The `.pkl` files will be ~1.1Gb each and training will slow down
       significantly. Use at your own risk!
+  * `--blur-percent`: Blur both real and generated images before passing them to the Discriminator. 
+    * The blur (`blur_init_sigma=10.0`) will completely fade after the selected percentage of the training is completed (using a linear ramp).
+    * Another experimental feature, should help with datasets that have a lot of variation, and you wish the model to slowly
+      learn to generate the objects and then its details.
   * `--mirrory`: Added vertical mirroring for doubling the dataset size (quadrupling if `--mirror` is used; make sure your dataset has either or both 
     of these symmetries in order for it to make sense to use them)
   * `--gamma`: If no R1 regularization is provided, the heuristic formula from [StyleGAN](https://github.com/NVlabs/stylegan2) will be used.

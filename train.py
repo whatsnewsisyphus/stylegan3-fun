@@ -138,8 +138,10 @@ def parse_comma_separated_list(s):
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
 @click.option('--initstrength', help='Override ADA augment strength at the beginning',          type=click.FloatRange(min=0.0), )
 @click.option('--freezeD',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
+# Experimental features.
 @click.option('--freezeM',      help='Freeze first layers of the Mapping Network Gm',           type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--freezeE',      help='Freeze the embedding layer for conditional models',       type=bool, default=False, show_default=True)
+@click.option('--blur-percent', help='Blur all images for the first % of training (before D)',  type=click.FloatRange(min=0.0, max=100.0), default=0.0, show_default=True)
 # Misc hyperparameters.
 @click.option('--gamma',        help='R1 regularization weight', metavar='FLOAT',               type=click.FloatRange(min=0), default=None)
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
@@ -296,6 +298,12 @@ def main(**kwargs):
             c.G_kwargs.use_radial_filters = True # Use radially symmetric downsampling filters.
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
+
+    # Curriculum learning: start blurring all images before passing to the Discriminator, and fade it out
+    if opts.blur_percent > 0:
+        c.loss_kwargs.blur_init_sigma = 10
+        total_kimg = opts.kimg - opts.resume_kimg
+        c.loss_kwargs.blur_fade_kimg = (opts.blur_percent / 100.0) * total_kimg
 
     # Augmentation.
     augpipe_specs = {
