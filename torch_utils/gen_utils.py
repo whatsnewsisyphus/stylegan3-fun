@@ -579,7 +579,7 @@ resume_specs = {
             # Self-Distilled StyleGAN (full body representation of each class): https://github.com/self-distilled-stylegan/self-distilled-internet-photos
             'sddogs1024':    'https://storage.googleapis.com/self-distilled-stylegan/dogs_1024_pytorch.pkl',
             'sdelephant512': 'https://storage.googleapis.com/self-distilled-stylegan/elephants_512_pytorch.pkl',
-            'sdhorses512':   'https://storage.googleapis.com/self-distilled-stylegan/horses_256_pytorch.pkl',
+            'sdhorses256':   'https://storage.googleapis.com/self-distilled-stylegan/horses_256_pytorch.pkl',
             'sdbicycles256': 'https://storage.googleapis.com/self-distilled-stylegan/bicycles_256_pytorch.pkl',
             'sdlions512':    'https://storage.googleapis.com/self-distilled-stylegan/lions_512_pytorch.pkl',
             'sdgiraffes512': 'https://storage.googleapis.com/self-distilled-stylegan/giraffes_512_pytorch.pkl',
