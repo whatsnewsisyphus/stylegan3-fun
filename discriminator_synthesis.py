@@ -17,7 +17,7 @@ import numpy as np
 
 import os
 import click
-from typing import Union, Tuple, Optional, List
+from typing import Union, Tuple, Optional, List, Type
 from tqdm import tqdm
 import re
 
@@ -174,7 +174,7 @@ def deep_dream(image: PIL.Image.Image,
                model_resolution: int,
                layers: List[str],
                channels: List[int],
-               seed: Union[int, type(None)],
+               seed: Union[int, Type[None]],
                normed: bool,
                sqrt_normed: bool,
                iterations: int,

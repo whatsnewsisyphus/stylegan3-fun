@@ -2,7 +2,7 @@ import os
 import re
 import json
 
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Type
 from collections import OrderedDict
 from locale import atof
 
@@ -188,7 +188,7 @@ def load_network(name: str, network_pkl: Union[str, os.PathLike], cfg: Optional[
     return net
 
 
-def parse_class(G, class_idx: int, ctx: click.Context) -> Union[int, type(None)]:
+def parse_class(G, class_idx: int, ctx: click.Context) -> Union[int, Type[None]]:
     """Parse the class_idx and return it, if it's allowed by the conditional model G"""
     if G.c_dim == 0:
         # Unconditional model
