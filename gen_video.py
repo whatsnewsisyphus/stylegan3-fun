@@ -22,6 +22,7 @@ import torch
 from tqdm import tqdm
 
 import legacy
+from torch_utils import gen_utils
 
 
 # ----------------------------------------------------------------------------
@@ -102,6 +103,9 @@ def gen_interp_video(G,
             G.synthesis.input.affine.bias.data.add_(shift.squeeze(0))
             G.synthesis.input.affine.weight.data.zero_()
 
+    # Get the Generator's transform
+    m = G.synthesis.input.transform
+
     if num_keyframes is None:
         if len(seeds) % (grid_w*grid_h) != 0:
             raise ValueError('Number of input seeds must be divisible by grid W*H')
@@ -135,6 +139,36 @@ def gen_interp_video(G,
     video_out = imageio.get_writer(mp4, mode='I', fps=60, codec='libx264', **video_kwargs)
     for frame_idx in tqdm(range(num_keyframes * w_frames)):
         imgs = []
+        # Construct an inverse affine matrix and pass to the generator. The generator expects 
+        # this matrix as an inverse to avoid potentially failing numerical operations in the network.
+        if hasattr(G.synthesis, 'input'):
+            # Set default values for each affine transformation
+            total_rotation = 0.0  # If >= 0.0, will rotate the pixels counter-clockwise w.r.t. the center; in radians
+            total_translation_x = 0.0  # If >= 0.0, will translate all pixels to the right; if <= 0.0, to the left
+            total_translation_y = 0.0  # If >= 0.0, will translate all pixels upwards; if <= 0.0, downwards
+            total_scale_x = 1.0  # If <= 1.0, will zoom in; else, will zoom out (x-axis)
+            total_scale_y = 1.0  # If <= 1.0, will zoom in; else, will zoom out (y-axis)
+            total_shear_x = 0.0  # If >= 0.0, will shear pixels to the right, keeping y fixed; if <= 0.0, to the left
+            total_shear_y = 0.0  # If >= 0.0, will shear pixels upwards, keeping x fixed; if <= 0.0, downwards
+            mirror_x = False  # Mirror along the x-axis; if True, will flip the image horizontally (can't be a function of frame_idx)
+            mirror_y = False  # Mirror along the y-axis; if True, will flip the image vertically (can't be a function of frame_idx)
+
+            # Go nuts with these. They can be constants as above to fix centering/rotation in your video, 
+            # or you can make them functions of frame_idx to animate them, such as (uncomment as many as you want to try):
+            # total_scale_x = 1 + np.sin(np.pi*frame_idx/(num_keyframes * w_frames))/2  # will oscillate between 0.5 and 1.5
+            # total_rotation = 4*np.pi*frame_idx/(num_keyframes * w_frames)  # 4 will dictate the number of rotations, so 1 full rotation
+            # total_shear_y = 2*np.sin(2*np.pi*frame_idx/(num_keyframes * w_frames))  # will oscillate between -2 and 2
+
+            # We then use these values to construct the affine matrix
+            m = gen_utils.make_affine_transform(m, angle=total_rotation, translate_x=total_translation_x,
+                                                translate_y=total_translation_y, scale_x=total_scale_x,
+                                                scale_y=total_scale_y, shear_x=total_shear_x, shear_y=total_shear_y,
+                                                mirror_x=mirror_x, mirror_y=mirror_y)
+            m = np.linalg.inv(m)
+            # Finally, we pass the matrix to the generator
+            G.synthesis.input.transform.copy_(torch.from_numpy(m))
+
+        # The rest stays the same, for all you gen_video.py lovers out there
         for yi in range(grid_h):
             for xi in range(grid_w):
                 interp = grid[yi][xi]
