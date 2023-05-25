@@ -19,6 +19,8 @@ import legacy
 
 from network_features import VGG16FeaturesNVIDIA
 
+import mediapipe as mp
+
 
 # ----------------------------------------------------------------------------
 
@@ -58,6 +60,7 @@ def parse_height(s: str = None) -> Union[int, Type[None]]:
 # How to set the fake dlatent
 @click.option('--v0', is_flag=True, help='Average the features of VGG and use a static dlatent to do style-mixing')
 @click.option('--v1', is_flag=True, help='Separate the input image into regions for coarse, middle, and fine layers for style-mixing')
+@click.option('--v2', is_flag=True, help='Manipulate the affine matrix of StyleGAN3 models (config-t and config-r)')
 # TODO: intermediate layers?
 # Video options
 @click.option('--display-height', type=parse_height, help="Height of the display window; if 'max', will use G.img_resolution", default=None, show_default=True)
@@ -67,7 +70,7 @@ def parse_height(s: str = None) -> Union[int, Type[None]]:
 # Extra parameters
 @click.option('--outdir', type=click.Path(file_okay=False), help='Directory path to save the results', default=os.path.join(os.getcwd(), 'out', 'videos'), show_default=True, metavar='DIR')
 @click.option('--description', '-desc', type=str, help='Description name for the directory path to save results', default='live_visual-reactive', show_default=True)
-@click.option('--verbose', is_flag=True, help='Print FPS of the live interpolation ever second')
+@click.option('--verbose', is_flag=True, help='Print FPS of the live interpolation ever second; plot the detected hands for `--v2`')
 def live_visual_reactive(
         ctx,
         network_pkl: str,
@@ -85,6 +88,7 @@ def live_visual_reactive(
         layer: str,
         v0: bool,
         v1: bool,
+        v2: bool,
         display_height: Optional[int],
         anchor_latent_space: bool,
         fps: int,
@@ -95,14 +99,16 @@ def live_visual_reactive(
     """Live Visual-Reactive interpolation. A camera/webcamera is needed to be accessed by OpenCV."""
     # Set device; GPU is recommended
     device = torch.device('cuda') if torch.cuda.is_available() and device == 'cuda' else torch.device('cpu')
-    # Load the feature extractor; here, VGG16
-    print('Loading VGG16 and its features...')
-    url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt'
-    with dnnlib.util.open_url(url) as f:
-        vgg16 = torch.jit.load(f).eval().to(device)
 
-    vgg16_features = VGG16FeaturesNVIDIA(vgg16).requires_grad_(False).to(device)
-    del vgg16
+    if v0 or v1:
+        # Load the feature extractor; here, VGG16
+        print('Loading VGG16 and its features...')
+        url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt'
+        with dnnlib.util.open_url(url) as f:
+            vgg16 = torch.jit.load(f).eval().to(device)
+
+        vgg16_features = VGG16FeaturesNVIDIA(vgg16).requires_grad_(False).to(device)
+        del vgg16
 
     # If model name exists in the gen_utils.resume_specs dictionary, use it instead of the full url
     try:
@@ -164,118 +170,262 @@ def live_visual_reactive(
     start_time = time.time()
     x = 1  # displays the frame rate every 1 second if verbose is True
     counter = 0
+    starting = True  # Initialize some default values only one time
     recording_flag = False
 
     # Preprocess each image for VGG16
     preprocess = transforms.Compose([transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                           std=[0.229, 0.224, 0.225])])
 
-    while cam.isOpened():
-        # read frame
-        idx += 1
-        ret_val, img = cam.read()
-        img = imutils.resize(img, height=height)
-        if mirror:
-            img = cv2.flip(img, 1)
-        img = np.array(img).transpose(2, 0, 1)
-        img = torch.from_numpy(img).unsqueeze(0).float().to(device)
+    if not v2:
+        while cam.isOpened():
+            # read frame
+            idx += 1
+            ret_val, img = cam.read()
+            img = imutils.resize(img, height=height)
+            if mirror:
+                img = cv2.flip(img, 1)
+            img = np.array(img).transpose(2, 0, 1)
+            img = torch.from_numpy(img).unsqueeze(0).float().to(device)
 
-        frame = preprocess(img).to(device)
-        fake_z = vgg16_features.get_layers_features(frame, layers=[layer])[0]
-        
-        # v0 
-        if v0:
-            fake_z = fake_z.view(1, 512, -1).mean(2)
-
-            # Perform EMA with previous fake_z
-            if counter == 0:
-                prev_fake_z = fake_z
-            # Do EMA
-            fake_z = 0.2 * prev_fake_z + 0.8 * fake_z
-            prev_fake_z = fake_z
-
-            fake_w = gen_utils.z_to_dlatent(G, fake_z, label, truncation_psi)
-
-            # Do style mixing
-            fake_w[:, 4:] = static_w[:, 4:]
-
-        # v1
-        elif v1:
-            _n, _c, h, w = fake_z.shape
+            frame = preprocess(img).to(device)
+            fake_z = vgg16_features.get_layers_features(frame, layers=[layer])[0]
             
-            # Separate into coarse/middle/fine according to areas
-            coarse_fake_z = fake_z[:, :, :h//2, :]
-            middle_fake_z = fake_z[:, :, h//2:, :w//2]
-            fine_fake_z = fake_z[:, :, h//2:, w//2:]
+            # v0 
+            if v0:
+                fake_z = fake_z.view(1, 512, -1).mean(2)
 
-            # Convert them to the expected shape (each region will be their own latent)
-            coarse_fake_z = coarse_fake_z.reshape(1, G.z_dim, -1).mean(2)
-            middle_fake_z = middle_fake_z.reshape(1, G.z_dim, -1).mean(2)
-            fine_fake_z = fine_fake_z.reshape(1, G.z_dim, -1).mean(2)
+                # Perform EMA with previous fake_z
+                if counter == 0:
+                    prev_fake_z = fake_z
+                # Do EMA
+                fake_z = 0.2 * prev_fake_z + 0.8 * fake_z
+                prev_fake_z = fake_z
 
-            # Get the respective dlatents
-            coarse_fake_w = gen_utils.z_to_dlatent(G, coarse_fake_z, label, 1.0)
-            middle_fake_w = gen_utils.z_to_dlatent(G, middle_fake_z, label, 1.0)
-            fine_fake_w = gen_utils.z_to_dlatent(G, fine_fake_z, label, 1.0)
-            fake_w = torch.cat([coarse_fake_w[:, :4], middle_fake_w[:, 4:8], fine_fake_w[:, 8:]], dim=1)  # [1, G.num_ws, G.z_dim]
+                fake_w = gen_utils.z_to_dlatent(G, fake_z, label, truncation_psi)
 
-            # Perform EMA with previous fake_w
-            if counter == 0:
+                # Do style mixing
+                fake_w[:, 4:] = static_w[:, 4:]
+
+            # v1
+            elif v1:
+                _n, _c, h, w = fake_z.shape
+                
+                # Separate into coarse/middle/fine according to areas
+                coarse_fake_z = fake_z[:, :, :h//2, :]
+                middle_fake_z = fake_z[:, :, h//2:, :w//2]
+                fine_fake_z = fake_z[:, :, h//2:, w//2:]
+
+                # Convert them to the expected shape (each region will be their own latent)
+                coarse_fake_z = coarse_fake_z.reshape(1, G.z_dim, -1).mean(2)
+                middle_fake_z = middle_fake_z.reshape(1, G.z_dim, -1).mean(2)
+                fine_fake_z = fine_fake_z.reshape(1, G.z_dim, -1).mean(2)
+
+                # Get the respective dlatents
+                coarse_fake_w = gen_utils.z_to_dlatent(G, coarse_fake_z, label, 1.0)
+                middle_fake_w = gen_utils.z_to_dlatent(G, middle_fake_z, label, 1.0)
+                fine_fake_w = gen_utils.z_to_dlatent(G, fine_fake_z, label, 1.0)
+                fake_w = torch.cat([coarse_fake_w[:, :4], middle_fake_w[:, 4:8], fine_fake_w[:, 8:]], dim=1)  # [1, G.num_ws, G.z_dim]
+
+                # Perform EMA with previous fake_w
+                if counter == 0 and starting:
+                    prev_fake_w = fake_w
+                    starting = False
+                # Do EMA
+                fake_w = 0.4 * prev_fake_w + 0.6 * fake_w
                 prev_fake_w = fake_w
-            # Do EMA
-            fake_w = 0.4 * prev_fake_w + 0.6 * fake_w
-            prev_fake_w = fake_w
 
-        # Set images to expected data type
-        img = img.clamp(0, 255).data[0].cpu().numpy()
-        img = img.transpose(1, 2, 0).astype('uint8')
+            # Set images to expected data type
+            img = img.clamp(0, 255).data[0].cpu().numpy()
+            img = img.transpose(1, 2, 0).astype('uint8')
 
-        simg = gen_utils.w_to_img(G, fake_w, noise_mode, w_avg, truncation_psi)[0]
-        simg = cv2.cvtColor(simg, cv2.COLOR_BGR2RGB)
-        
-        # display
-        if not only_synth:
-            display_width = int(4/3*display_height)
-            # Resize input image from the camera
-            img = cv2.resize(img, (display_width, display_height))
-            # Resize accordingly the synthesized image
-            simg = cv2.resize(simg, (display_height, display_height), interpolation=cv2.INTER_CUBIC)
-            img = np.concatenate((img, simg), axis=1)
-            cv2.imshow('Visuorreactive Demo', img)
-        else:
-            # Resize the synthesized image to the desired display height/width
-            simg = cv2.resize(simg, (display_height, display_height))
-            cv2.imshow('Visuorreactive Demo - Only Synth Image', simg)
-
-        counter += 1
-
-        # FPS counter
-        if (time.time() - start_time) > x and verbose:
-            print(f"FPS: {counter / (time.time() - start_time):0.2f}")
-            counter = 0
-            start_time = time.time()
-
-        # ESC to quit; SPACE to start recording
-        key = cv2.waitKey(1)
-
-        if key == 27:
-            break
-        elif key == 32:
-            # Transition from not recording to recording
-            if not recording_flag:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                w = width + swidth if not only_synth else G.img_resolution
-                out = cv2.VideoWriter('output.mp4', fourcc, fps, (w, height))
-                recording_flag = True
+            simg = gen_utils.w_to_img(G, fake_w, noise_mode, w_avg, truncation_psi)[0]
+            simg = cv2.cvtColor(simg, cv2.COLOR_BGR2RGB)
+            
+            # display
+            if not only_synth:
+                display_width = int(4/3*display_height)
+                # Resize input image from the camera
+                img = cv2.resize(img, (display_width, display_height))
+                # Resize accordingly the synthesized image
+                simg = cv2.resize(simg, (display_height, display_height), interpolation=cv2.INTER_CUBIC)
+                img = np.concatenate((img, simg), axis=1)
+                cv2.imshow('Visuorreactive Demo', img)
             else:
-                recording_flag = False
-                out.release()
+                # Resize the synthesized image to the desired display height/width
+                simg = cv2.resize(simg, (display_height, display_height))
+                cv2.imshow('Visuorreactive Demo - Only Synth Image', simg)
 
-        if recording_flag:
-            out.write(img)
+            counter += 1
 
-    cam.release()
-    cv2.destroyAllWindows()
+            # FPS counter
+            if (time.time() - start_time) > x and verbose:
+                print(f"FPS: {counter / (time.time() - start_time):0.2f}")
+                counter = 0
+                start_time = time.time()
+
+            # ESC to quit; SPACE to start recording
+            key = cv2.waitKey(1)
+
+            if key == 27:
+                break
+            elif key == 32:
+                # Transition from not recording to recording
+                if not recording_flag:
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    w = width + swidth if not only_synth else G.img_resolution
+                    out = cv2.VideoWriter('output.mp4', fourcc, fps, (w, height))
+                    recording_flag = True
+                else:
+                    recording_flag = False
+                    out.release()
+
+            if recording_flag:
+                out.write(img)
+
+        cam.release()
+        cv2.destroyAllWindows()
+
+    else:
+        # TODO: Clean this, this is a mess
+        mp_drawing = mp.solutions.drawing_utils
+        mp_drawing_styles = mp.solutions.drawing_styles
+        mp_hands = mp.solutions.hands
+        cap = cv2.VideoCapture(0)
+        # Only for StyleGAN3 models
+        assert hasattr(G.synthesis, 'input'), '`--v2` is only meant to be used with StyleGAN3 models!'
+
+        with mp_hands.Hands(
+            model_complexity=0,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5) as hands:
+            counter = 0
+
+            while cap.isOpened():
+                success, image = cap.read()
+                if not success:
+                    print("Ignoring empty camera frame.")
+                    continue
+
+                # To improve performance, optionally mark the image as not writeable to
+                # pass by reference.
+                image.flags.writeable = False
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                results = hands.process(image)
+
+                # Get the hand rotation w.r.t. the landmarks (concretely, the wrist [0] and middle finger [9]
+                # will define the Y axis; the x-axis will be 90 degrees counter-clockwise from it)
+                # Set the vertical direction as 0.0
+                if results.multi_hand_landmarks:
+                    # Just one hand will dictate the rotation
+                    base = results.multi_hand_landmarks[0].landmark[0]
+                    middle = results.multi_hand_landmarks[0].landmark[9]
+                    dx = middle.x - base.x
+                    dy = middle.y - base.y
+                    angle = - np.pi / 2 - np.arctan2(dy, dx)  # Set s.t. line(palm, middle finger) is the vertical axis
+
+                    # If there is a second hand, we will use it to translate the image
+                    # 
+                    if len(results.multi_hand_landmarks) > 1:
+                        # Let's get the position in x and y of the center of the whole hand
+                        # Calculate the center of the hand (average of all landmarks)
+                        x = 0.0
+                        y = 0.0
+                        for landmark in results.multi_hand_landmarks[1].landmark:
+                            x += landmark.x
+                            y += landmark.y
+                        x /= len(results.multi_hand_landmarks[1].landmark)
+                        y /= len(results.multi_hand_landmarks[1].landmark)
+                    else:
+                        x = 0.0 if starting else prev_x * 0.9 # EMA towards zero
+                        y = 0.0 if starting else prev_y * 0.9 # EMA towards zero
+
+                else:
+                    angle = 0.0 if starting else prev_angle * 0.9 # EMA towards zero
+                    x = 0.0 if starting else prev_x * 0.9 # EMA towards zero
+                    y = 0.0 if starting else prev_y * 0.9 # EMA towards zero
+                
+                if counter == 0 and starting:
+                    prev_angle = angle
+                    prev_x = x
+                    prev_y = y
+                    starting = False
+
+                # ema these values
+                angle = 0.2 * prev_angle + 0.8 * angle
+                prev_angle = angle
+
+                x = 0.2 * prev_x + 0.8 * x
+                prev_x = x
+                y = 0.2 * prev_y + 0.8 * y
+                prev_y = y
+
+                # FPS and angle
+                if (time.time() - start_time) > x and verbose:
+                    print(f'FPS: {counter / (time.time() - start_time):0.2f}, Angle (in radians): {angle:.3f}')
+                    counter = 0
+                    start_time = time.time()
+
+                # Use the angle to rotate the image
+                m = gen_utils.make_affine_transform(None, angle=angle, scale_x=1-x, scale_y=1-y)
+                m = np.linalg.inv(m)
+                # Finally, we pass the matrix to the generator
+                G.synthesis.input.transform.copy_(torch.from_numpy(m))
+
+                # Draw the hand annotations on the image.
+                image.flags.writeable = True
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                if results.multi_hand_landmarks and verbose:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            image,
+                            hand_landmarks,
+                            mp_hands.HAND_CONNECTIONS,
+                            mp_drawing_styles.get_default_hand_landmarks_style(),
+                            mp_drawing_styles.get_default_hand_connections_style())
+
+                # Synthesize the image
+                simg = gen_utils.w_to_img(G, static_w, noise_mode, w_avg, truncation_psi)[0]
+                simg = cv2.cvtColor(simg, cv2.COLOR_BGR2RGB)
+
+                # display
+                if not only_synth:
+                    display_width = int(4/3*display_height)
+                    # Resize input image from the camera
+                    img = cv2.resize(image, (display_width, display_height))
+                    w, h = display_width, display_height
+                    # Resize accordingly the synthesized image
+                    simg = cv2.resize(simg, (display_height, display_height), interpolation=cv2.INTER_CUBIC)
+                    w += h
+                    img = np.concatenate((img, simg), axis=1)
+                    cv2.imshow('Visuorreactive Demo', img)
+                else:
+                    # Resize the synthesized image to the desired display height/width
+                    simg = cv2.resize(simg, (display_height, display_height))
+                    w, h = display_height, display_height
+                    cv2.imshow('Visuorreactive Demo - Only Synth Image', simg)
+
+                counter += 1
+                
+                key = cv2.waitKey(1)
+                # User presses 'ESC' to exit
+                if key == 27:
+                    break
+                elif key == 32:
+                # Transition from not recording to recording
+                    if not recording_flag:
+                        print('Recording started')
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        out = cv2.VideoWriter('visualreactive_affinematrix_v2.mp4', fourcc, fps, (w, h))
+                        recording_flag = True
+                    else:
+                        print('Recording stopped')
+                        recording_flag = False
+                        out.release()
+
+                if recording_flag:
+                    out.write(img)
+            cap.release()
 
 
 if __name__ == '__main__':
