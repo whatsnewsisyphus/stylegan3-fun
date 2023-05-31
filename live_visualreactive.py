@@ -11,7 +11,11 @@ import numpy as np
 import cv2
 import imutils
 import PIL.Image
+
 import scipy
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
 import torch
 from torchvision import transforms
 
@@ -295,6 +299,24 @@ def live_visual_reactive(
         # Only for StyleGAN3 models
         assert hasattr(G.synthesis, 'input'), '`--v2` is only meant to be used with StyleGAN3 models!'
 
+        # Let's calculate the PCA of the latent space
+        # TODO: let the user provide the latents to use (.npy/.npz file)
+        num_latents = 60000
+        zs = torch.from_numpy(np.random.RandomState(seed).randn(num_latents, G.z_dim)).to(device)
+        ws = gen_utils.z_to_dlatent(G, zs, label, truncation_psi=1.0)[:, 0]
+
+        scaler = StandardScaler()
+        pca = PCA(n_components=5)
+
+        # Scaled latents
+        scaled_ws = scaler.fit_transform(ws.cpu().numpy())
+        # PCA
+        pca.fit(scaled_ws)
+        # Get the principal components (scaled to the original space)
+        principal_components = scaler.inverse_transform(pca.components_)
+        # Normalize them
+        principal_components = principal_components / np.linalg.norm(principal_components, axis=1, keepdims=True)
+
         with mp_hands.Hands(
             model_complexity=0,
             min_detection_confidence=0.5,
@@ -324,26 +346,34 @@ def live_visual_reactive(
                     dy = middle.y - base.y
                     angle = - np.pi / 2 - np.arctan2(dy, dx)  # Set s.t. line(palm, middle finger) is the vertical axis
 
-                    # If there is a second hand, we will use it to translate the image
-                    # 
-                    if len(results.multi_hand_landmarks) > 1:
-                        # Let's get the position in x and y of the center of the whole hand
-                        # Calculate the center of the hand (average of all landmarks)
-                        x = 0.0
-                        y = 0.0
-                        for landmark in results.multi_hand_landmarks[1].landmark:
-                            x += landmark.x
-                            y += landmark.y
-                        x /= len(results.multi_hand_landmarks[1].landmark)
-                        y /= len(results.multi_hand_landmarks[1].landmark)
-                    else:
-                        x = 0.0 if starting else prev_x * 0.9 # EMA towards zero
-                        y = 0.0 if starting else prev_y * 0.9 # EMA towards zero
+                    # Let's get the position in x and y of the center of the whole hand
+                    # Calculate the center of the hand (average of all landmarks)
+                    x = 0.0
+                    y = 0.0
+                    for landmark in results.multi_hand_landmarks[0].landmark:
+                        x += landmark.x
+                        y += landmark.y
+                    x /= len(results.multi_hand_landmarks[0].landmark)
+                    y /= len(results.multi_hand_landmarks[0].landmark)
+
+                    # Now, calculate the distance form each fingertip to the center of the hand
+                    # and normalize it
+                    finger_distances = []
+                    for i in range(5, 21, 4):
+                        finger_distances.append(np.sqrt((results.multi_hand_landmarks[0].landmark[i].x - x) ** 2 +
+                                                        (results.multi_hand_landmarks[0].landmark[i].y - y) ** 2))
+                    finger_distances = np.array(finger_distances)
+                    finger_distances /= np.max(finger_distances)
+
+                    # Set the center of the image as the origin
+                    x -= 0.5
+                    y -= 0.5
 
                 else:
-                    angle = 0.0 if starting else prev_angle * 0.9 # EMA towards zero
-                    x = 0.0 if starting else prev_x * 0.9 # EMA towards zero
-                    y = 0.0 if starting else prev_y * 0.9 # EMA towards zero
+                    angle = 0.0 if starting else prev_angle * 0.9  # EMA towards zero
+                    x = 0.0 if starting else prev_x * 0.9  # EMA towards zero
+                    y = 0.0 if starting else prev_y * 0.9  # EMA towards zero
+                    finger_distances = np.zeros((5, 1))
                 
                 if counter == 0 and starting:
                     prev_angle = angle
@@ -385,6 +415,12 @@ def live_visual_reactive(
                             mp_drawing_styles.get_default_hand_connections_style())
 
                 # Synthesize the image
+                # Use the principal components to modify the static latent vector
+                # We need to multiply the principal components by the finger distances, and add each individually
+                # to the static latent vector
+                for i in range(len(finger_distances)):
+                    static_w = static_w + torch.from_numpy(principal_components[i] * finger_distances[i]).to(device)
+
                 simg = gen_utils.w_to_img(G, static_w, noise_mode, w_avg, truncation_psi)[0]
                 simg = cv2.cvtColor(simg, cv2.COLOR_BGR2RGB)
 
