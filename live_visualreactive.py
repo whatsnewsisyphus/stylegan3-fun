@@ -65,6 +65,7 @@ def parse_height(s: str = None) -> Union[int, Type[None]]:
 @click.option('--v0', is_flag=True, help='Average the features of VGG and use a static dlatent to do style-mixing')
 @click.option('--v1', is_flag=True, help='Separate the input image into regions for coarse, middle, and fine layers for style-mixing')
 @click.option('--v2', is_flag=True, help='Manipulate the affine matrix of StyleGAN3 models (config-t and config-r)')
+@click.option('--v3', is_flag=True, help='Latent mirror. Warning, should be used with low-resolution models (e.g., 16x16)')
 # TODO: intermediate layers?
 # Video options
 @click.option('--display-height', type=parse_height, help="Height of the display window; if 'max', will use G.img_resolution", default=None, show_default=True)
@@ -93,6 +94,7 @@ def live_visual_reactive(
         v0: bool,
         v1: bool,
         v2: bool,
+        v3: bool,
         display_height: Optional[int],
         anchor_latent_space: bool,
         fps: int,
@@ -181,7 +183,7 @@ def live_visual_reactive(
     preprocess = transforms.Compose([transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                           std=[0.229, 0.224, 0.225])])
 
-    if not v2:
+    if v0 or v1:
         while cam.isOpened():
             # read frame
             idx += 1
@@ -290,12 +292,11 @@ def live_visual_reactive(
         cam.release()
         cv2.destroyAllWindows()
 
-    else:
+    elif v2:
         # TODO: Clean this, this is a mess
         mp_drawing = mp.solutions.drawing_utils
         mp_drawing_styles = mp.solutions.drawing_styles
         mp_hands = mp.solutions.hands
-        cap = cv2.VideoCapture(0)
         # Only for StyleGAN3 models
         assert hasattr(G.synthesis, 'input'), '`--v2` is only meant to be used with StyleGAN3 models!'
 
@@ -323,8 +324,8 @@ def live_visual_reactive(
             min_tracking_confidence=0.5) as hands:
             counter = 0
 
-            while cap.isOpened():
-                success, image = cap.read()
+            while cam.isOpened():
+                success, image = cam.read()
                 if not success:
                     print("Ignoring empty camera frame.")
                     continue
@@ -461,7 +462,63 @@ def live_visual_reactive(
 
                 if recording_flag:
                     out.write(img)
-            cap.release()
+            cam.release()
+
+    elif v3:
+        # Set number of rows and columns for the generated "mirror"
+        num_frames = 900
+        nrows = 10
+        ncols = 10
+        shape = [num_frames, nrows * ncols, G.z_dim]
+        # Generate a loop of images
+        all_latents = np.random.RandomState(seed).randn(*shape).astype(np.float32)
+        all_latents = scipy.ndimage.gaussian_filter(all_latents, sigma=[3.0 * 30, 0, 0], mode='wrap')
+        all_latents /= np.sqrt(np.mean(np.square(all_latents)))
+        all_latents = torch.from_numpy(all_latents).to(device)
+
+        c = 0
+        while cam.isOpened():
+            ret, img = cam.read()
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            canny = cv2.Canny(blur, 10, 70)
+            ret, mask = cv2.threshold(canny, 70, 255, cv2.THRESH_BINARY)
+
+            # Truncation trick
+            # Reshape the mask to the same size as the latent vector
+            mask = cv2.resize(mask, (nrows, ncols), interpolation=cv2.INTER_AREA)
+            mask = mask.astype(np.float32) / float(mask.max())
+            trunc = torch.from_numpy(mask).view(-1, 1, 1).to(device)
+            trunc = 1.0 - trunc
+
+            # Get the latent vectors
+            z = all_latents[c % num_frames]
+            w = G.mapping(z, None)
+            w = w * trunc + G.mapping.w_avg * (1 - trunc)
+
+            c += 1
+
+            simg = gen_utils.w_to_img(G, w, truncation_psi=truncation_psi)
+            simg = gen_utils.create_image_grid(simg, (ncols, nrows))
+            simg = cv2.cvtColor(simg, cv2.COLOR_BGR2RGB)
+
+            # Resize the synthesized image to the desired display height/width
+            simg = cv2.resize(simg, (int(display_height * ncols / nrows), display_height))
+
+            cv2.imshow('Video feed', simg)
+
+            counter += 1
+            # FPS counter
+            if (time.time() - start_time) > x and verbose:
+                print(f"FPS: {counter / (time.time() - start_time):0.2f}")
+                counter = 0
+                start_time = time.time()
+
+            key = cv2.waitKey(1)
+            # User presses 'ESC' to exit
+            if key == 27:
+                break
+        cam.release()
 
 
 if __name__ == '__main__':
