@@ -5,6 +5,7 @@ import click
 
 import dnnlib
 from torch_utils import gen_utils
+import copy
 
 import scipy
 import numpy as np
@@ -570,6 +571,7 @@ def random_interpolation_video(
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)')
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--anchor-latent-space', '-anchor', is_flag=True, help='Anchor the latent space to w_avg to stabilize the video')
+@click.option('--flesh', 'aydao_flesh_digression', is_flag=True, help='If set, we will slowly modify the constant input to the network (based on @aydao\'s work')
 # Video options
 @click.option('--grid-width', '-gw', type=click.IntRange(min=1), help='Video grid width / number of columns', required=True)
 @click.option('--grid-height', '-gh', type=click.IntRange(min=1), help='Video grid height / number of rows', required=True)
@@ -595,6 +597,7 @@ def circular_video(
         class_idx: Optional[int],
         noise_mode: Optional[str],
         anchor_latent_space: Optional[bool],
+        aydao_flesh_digression: Optional[bool],
         grid_width: int,
         grid_height: int,
         duration_sec: float,
@@ -611,6 +614,18 @@ def circular_video(
 
     # Load the network
     G = gen_utils.load_network('G_ema', network_pkl, cfg, device)
+
+    # Get the constant input
+    if aydao_flesh_digression:
+        if hasattr(G.synthesis, 'b4'):
+            model_type = 'stylegan2'
+            const_input = copy.deepcopy(G.synthesis.b4.const).cpu().numpy()
+        elif hasattr(G.synthesis, 'input'):
+            model_type = 'stylegan3'
+            input_frequencies = copy.deepcopy(G.synthesis.input.freqs).cpu().numpy()
+            input_phases = copy.deepcopy(G.synthesis.input.phases).cpu().numpy()
+        else:
+            ctx.fail('Error: This option is only available for StyleGAN2 and StyleGAN3 models!')
 
     # Get the labels, if the model is conditional
     class_idx = gen_utils.parse_class(G, class_idx, ctx)
@@ -652,8 +667,7 @@ def circular_video(
             message = f"Number of centers ({num_centers}) doesn't match the grid size ({grid_height}x{grid_width})"
             raise ctx.fail(message)
 
-    print('Using wave pulsation trick' if wave_pulsation_trick else 'Using global pulsation trick' if global_pulsation_trick else 'Using no pulsation trick')
-
+    print('Using wave pulsation trick' if wave_pulsation_trick else 'Using global pulsation trick' if global_pulsation_trick else 'Using standard truncation trick...')
     # Stabilize/anchor the latent space
     if anchor_latent_space:
         gen_utils.anchor_latent_space(G)
@@ -661,6 +675,7 @@ def circular_video(
     # Create the run dir with the given name description; add slowdown if different from the default (1)
     desc = 'circular-video'
     desc = f'circular-video-{description}' if description is not None else desc
+    desc = f'{desc}-aydao-flesh-digression' if aydao_flesh_digression else desc
     run_dir = gen_utils.make_run_dir(outdir, desc)
 
     # Calculate the total number of frames in the video
@@ -674,7 +689,7 @@ def circular_video(
     try:
         z1, z2 = np.split(random_state.choice(G.z_dim, 2 * np.prod(grid_size), replace=False), 2)
     except ValueError:
-        # Extreme case: G.z_dim < 2 * grid_width * grid_height (low G.
+        # Extreme case: G.z_dim < 2 * grid_width * grid_height (low G.z_dim most likely)
         z1, z2 = np.split(random_state.choice(G.z_dim, 2 * np.prod(grid_size), replace=True), 2)
 
     # We partition the circle in equal strides w.r.t. num_frames
@@ -693,6 +708,21 @@ def circular_video(
     for box in range(np.prod(grid_size)):
         box_frames = all_latents[:, box]
         box_frames[:, [z1[box], z2[box]]] = np.vstack((Z1, Z2)).T
+
+    if aydao_flesh_digression:
+        # We will modify the constant input to the network (for --cfg=stylegan2)
+        if model_type == 'stylegan2':
+            const_input_interpolation = np.random.randn(num_frames, *const_input.shape).astype(np.float32) / 4  # [num_frames, G.w_dim, 4, 4] ;  "/ 4" is arbitrary
+            const_input_interpolation = scipy.ndimage.gaussian_filter(const_input_interpolation, sigma=[fps, 0, 0, 0], mode='wrap')
+            const_input_interpolation /= np.sqrt(np.mean(np.square(const_input_interpolation)))
+        elif model_type == 'stylegan3':
+            const_freq_interpolation = np.random.randn(num_frames, *input_frequencies.shape).astype(np.float32) / 32  # [num_frames, G.w_dim, 2]
+            const_freq_interpolation = scipy.ndimage.gaussian_filter(const_freq_interpolation, sigma=[5.0*fps, 0, 0], mode='wrap')
+            const_freq_interpolation /= np.sqrt(np.mean(np.square(const_freq_interpolation)))
+
+            const_phase_interpolation = np.random.randn(num_frames, *input_phases.shape).astype(np.float32) / 8  # [num_frames, G.w_dim, 2]
+            const_phase_interpolation = scipy.ndimage.gaussian_filter(const_phase_interpolation, sigma=[5.0*fps, 0], mode='wrap')
+            const_phase_interpolation /= np.sqrt(np.mean(np.square(const_phase_interpolation)))
 
     # Convert to torch tensor
     if new_w_avg is not None:
@@ -719,8 +749,8 @@ def circular_video(
             # For both, truncation psi will have the general form of a sinusoid: psi = (cos(t) + alpha) / beta
             if global_pulsation_trick:
                 tr = gen_utils.global_pulsate_psi(psi_start=truncation_psi_start,
-                                                              psi_end=truncation_psi_end,
-                                                              n_steps=num_frames)
+                                                  psi_end=truncation_psi_end,
+                                                  n_steps=num_frames)
             elif wave_pulsation_trick:
                 tr = gen_utils.wave_pulse_truncation_psi(psi_start=truncation_psi_start,
                                                          psi_end=truncation_psi_end,
@@ -738,6 +768,17 @@ def circular_video(
             tr = truncation_psi
 
         w = w_avg + (dlatents - w_avg) * tr
+        # Modify the constant input
+        if aydao_flesh_digression:
+            if model_type == 'stylegan2':
+                G.synthesis.b4.const.copy_(torch.from_numpy(const_input_interpolation[frame_idx]))
+            elif model_type == 'stylegan3':
+                pass
+                # G.synthesis.input.freqs.copy_(torch.from_numpy(const_freq_interpolation[frame_idx]))
+                # G.synthesis.input.phases.copy_(torch.from_numpy(const_phase_interpolation[frame_idx]))
+                # G.synthesis.input.phases.copy_(torch.from_numpy(
+                #     input_phases * np.cos(np.pi * frame_idx / num_frames) ** 2
+                #     ))
         # Get the images
         images = gen_utils.w_to_img(G, w, noise_mode, new_w_avg, tr)
         # RGBA -> RGB

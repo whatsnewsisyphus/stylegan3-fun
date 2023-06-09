@@ -2,6 +2,7 @@ import os
 from typing import List, Union, Optional, Tuple, Type
 import click
 import time
+import copy
 
 import dnnlib
 from torch_utils import gen_utils
@@ -52,7 +53,7 @@ def parse_height(s: str = None) -> Union[int, Type[None]]:
 @click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
 # Synthesis options (feed a list of seeds or give the projected w to synthesize)
 @click.option('--seed', type=click.INT, help='Random seed to use for static synthesized image', default=0, show_default=True)
-@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=0.7, show_default=True)
+@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=0.6, show_default=True)
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)', default=None, show_default=True)
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--new-center', type=gen_utils.parse_new_center, help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
@@ -64,7 +65,7 @@ def parse_height(s: str = None) -> Union[int, Type[None]]:
 # How to set the fake dlatent
 @click.option('--v0', is_flag=True, help='Average the features of VGG and use a static dlatent to do style-mixing')
 @click.option('--v1', is_flag=True, help='Separate the input image into regions for coarse, middle, and fine layers for style-mixing')
-@click.option('--v2', is_flag=True, help='Manipulate the affine matrix of StyleGAN3 models (config-t and config-r)')
+@click.option('--v2', is_flag=True, help='Manipulate the input to the Generator (StyleGAN2 and 3)')
 @click.option('--v3', is_flag=True, help='Latent mirror. Warning, should be used with low-resolution models (e.g., 16x16)')
 # TODO: intermediate layers?
 # Video options
@@ -297,26 +298,26 @@ def live_visual_reactive(
         mp_drawing = mp.solutions.drawing_utils
         mp_drawing_styles = mp.solutions.drawing_styles
         mp_hands = mp.solutions.hands
-        # Only for StyleGAN3 models
-        assert hasattr(G.synthesis, 'input'), '`--v2` is only meant to be used with StyleGAN3 models!'
 
-        # Let's calculate the PCA of the latent space
-        # TODO: let the user provide the latents to use (.npy/.npz file)
-        num_latents = 60000
-        zs = torch.from_numpy(np.random.RandomState(seed).randn(num_latents, G.z_dim)).to(device)
-        ws = gen_utils.z_to_dlatent(G, zs, label, truncation_psi=1.0)[:, 0]
+        # Generate a loop of images
+        num_frames = 900
+        shape = [num_frames, 1, G.z_dim]
+        # Generate a loop of images
+        all_latents = np.random.RandomState(seed).randn(*shape).astype(np.float32)
+        all_latents = scipy.ndimage.gaussian_filter(all_latents, sigma=[3.0 * 30, 0, 0], mode='wrap')
+        all_latents /= np.sqrt(np.mean(np.square(all_latents)))
+        all_latents = torch.from_numpy(all_latents).to(device)
 
-        scaler = StandardScaler()
-        pca = PCA(n_components=5)
+        c = 0
 
-        # Scaled latents
-        scaled_ws = scaler.fit_transform(ws.cpu().numpy())
-        # PCA
-        pca.fit(scaled_ws)
-        # Get the principal components (scaled to the original space)
-        principal_components = scaler.inverse_transform(pca.components_)
-        # Normalize them
-        principal_components = principal_components / np.linalg.norm(principal_components, axis=1, keepdims=True)
+        if hasattr(G.synthesis, 'b4'):
+            model_type = 'stylegan2'
+            const_input = copy.deepcopy(G.synthesis.b4.const).cpu().numpy()
+            const_input_interpolation = np.random.randn(num_frames, *const_input.shape).astype(np.float32)  # [num_frames, G.w_dim, 4, 4]
+            const_input_interpolation = scipy.ndimage.gaussian_filter(const_input_interpolation, sigma=[fps, 0, 0, 0], mode='wrap')
+            const_input_interpolation /= np.sqrt(np.mean(np.square(const_input_interpolation))) / 2
+        elif hasattr(G.synthesis, 'input'):
+            model_type = 'stylegan3'
 
         with mp_hands.Hands(
             model_complexity=0,
@@ -340,46 +341,65 @@ def live_visual_reactive(
                 # will define the Y axis; the x-axis will be 90 degrees counter-clockwise from it)
                 # Set the vertical direction as 0.0
                 if results.multi_hand_landmarks:
-                    # Just one hand will dictate the rotation
-                    base = results.multi_hand_landmarks[0].landmark[0]
-                    middle = results.multi_hand_landmarks[0].landmark[9]
+                    # Just the first hand
+                    hand = results.multi_hand_landmarks[-1]
+                    
+                    base = hand.landmark[0]
+                    middle = hand.landmark[9]
                     dx = middle.x - base.x
                     dy = middle.y - base.y
                     angle = - np.pi / 2 - np.arctan2(dy, dx)  # Set s.t. line(palm, middle finger) is the vertical axis
 
                     # Let's get the position in x and y of the center of the whole hand
                     # Calculate the center of the hand (average of all landmarks)
+                    # Set the center of the image as the origin
                     x = 0.0
                     y = 0.0
-                    for landmark in results.multi_hand_landmarks[0].landmark:
+                    z = 0.0
+                    area_points = []
+                    for idx, landmark in enumerate(hand.landmark):
                         x += landmark.x
                         y += landmark.y
-                    x /= len(results.multi_hand_landmarks[0].landmark)
-                    y /= len(results.multi_hand_landmarks[0].landmark)
+                        z += landmark.z
+                        if idx in range(0, 21, 4):
+                            area_points.append([landmark.x, landmark.y])
+                    x /= len(hand.landmark)
+                    y /= len(hand.landmark)
+                    z /= len(hand.landmark)
 
-                    # Now, calculate the distance form each fingertip to the center of the hand
-                    # and normalize it
-                    finger_distances = []
-                    for i in range(5, 21, 4):
-                        finger_distances.append(np.sqrt((results.multi_hand_landmarks[0].landmark[i].x - x) ** 2 +
-                                                        (results.multi_hand_landmarks[0].landmark[i].y - y) ** 2))
-                    finger_distances = np.array(finger_distances)
-                    finger_distances /= np.max(finger_distances)
-
-                    # Set the center of the image as the origin
                     x -= 0.5
                     y -= 0.5
 
+                    # Calculate the distance to the origin
+                    dist = np.sqrt(x ** 2 + y ** 2)
+                    # Normalize it
+                    dist *= 4*2 ** 0.5  # Max distance is 1/sqrt(2)
+
+                    # Get the area of the hand enclosed between the 5 fingers and the wrist
+                    # We will use the trapezoidal rule to approximate the area
+                    hand_area = 0.0
+                    for i in range(len(area_points) - 1):
+                        hand_area += (area_points[i][0] - area_points[i + 1][0]) * (area_points[i][1] + area_points[i + 1][1])
+                    hand_area += (area_points[-1][0] - area_points[0][0]) * (area_points[-1][1] + area_points[0][1])
+                    hand_area = abs(hand_area) / 2
+
+
                 else:
-                    angle = 0.0 if starting else prev_angle * 0.9  # EMA towards zero
-                    x = 0.0 if starting else prev_x * 0.9  # EMA towards zero
-                    y = 0.0 if starting else prev_y * 0.9  # EMA towards zero
-                    finger_distances = np.zeros((5, 1))
+                    # EMAs toward zero
+                    angle = 0.0 if starting else prev_angle * 0.9
+                    x = 0.0 if starting else prev_x * 0.9
+                    y = 0.0 if starting else prev_y * 0.9
+                    z = 0.0 if starting else prev_z * 0.9
+                    dist = 0.0 if starting else prev_dist * 0.9
+                    hand_area = 0.0 if starting else prev_hand_area * 0.9
                 
                 if counter == 0 and starting:
                     prev_angle = angle
                     prev_x = x
                     prev_y = y
+                    prev_z = z
+                    prev_dist = dist
+                    prev_hand_area = hand_area
                     starting = False
 
                 # ema these values
@@ -390,22 +410,38 @@ def live_visual_reactive(
                 prev_x = x
                 y = 0.2 * prev_y + 0.8 * y
                 prev_y = y
+                z = 0.2 * prev_z + 0.8 * z
+                prev_z = z
+
+                dist = 0.2 * prev_dist + 0.8 * dist
+                prev_dist = dist
+
+                hand_area = 0.2 * prev_hand_area + 0.8 * hand_area
+                prev_hand_area = hand_area
 
                 # FPS and angle
                 if (time.time() - start_time) > x and verbose:
-                    print(f'FPS: {counter / (time.time() - start_time):0.2f}, Angle (in radians): {angle:.3f}')
+                    print(f'[{c % num_frames} / {num_frames}] FPS: {counter / (time.time() - start_time):0.2f}, '
+                          f'Angle (rad): {angle:.3f}, Hand Center: ({x:.3f}, {y:.3f}, {z:.3f}), Distance: {dist:.3f}, Area: {hand_area:.3f}')
                     counter = 0
                     start_time = time.time()
 
-                # Use the angle to rotate the image
-                m = gen_utils.make_affine_transform(None, angle=angle, scale_x=1-x, scale_y=1-y)
-                m = np.linalg.inv(m)
-                # Finally, we pass the matrix to the generator
-                G.synthesis.input.transform.copy_(torch.from_numpy(m))
+                if hasattr(G.synthesis, 'input'):
+                # Rotate and translate the image
+                    m = gen_utils.make_affine_transform(None, angle=angle, translate_x=x, translate_y=-y,
+                                                        scale_x=1+2*z, scale_y=1+2*z)
+                    m = np.linalg.inv(m)
+                    # Finally, we pass the matrix to the generator
+                    G.synthesis.input.transform.copy_(torch.from_numpy(m))
+
+                elif hasattr(G.synthesis, 'b4'):
+                    G.synthesis.b4.const.copy_(torch.from_numpy((1 - dist) * const_input + const_input_interpolation[c % num_frames] * dist))
 
                 # Draw the hand annotations on the image.
                 image.flags.writeable = True
                 image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                # Replace image with a white background
+                image[:] = (255, 255, 255)
                 if results.multi_hand_landmarks and verbose:
                     for hand_landmarks in results.multi_hand_landmarks:
                         mp_drawing.draw_landmarks(
@@ -415,27 +451,41 @@ def live_visual_reactive(
                             mp_drawing_styles.get_default_hand_landmarks_style(),
                             mp_drawing_styles.get_default_hand_connections_style())
 
-                # Synthesize the image
-                # Use the principal components to modify the static latent vector
-                # We need to multiply the principal components by the finger distances, and add each individually
-                # to the static latent vector
-                for i in range(len(finger_distances)):
-                    static_w = static_w + torch.from_numpy(principal_components[i] * finger_distances[i]).to(device)
+                # Get the latent vectors
+                latent = all_latents[c % num_frames]
+                c += 1
 
-                simg = gen_utils.w_to_img(G, static_w, noise_mode, w_avg, truncation_psi)[0]
+                # Synthesize the image
+                simg = gen_utils.z_to_img(G=G, latents=latent, label=label, 
+                                          truncation_psi=truncation_psi, noise_mode=noise_mode)[0]
                 simg = cv2.cvtColor(simg, cv2.COLOR_BGR2RGB)
 
                 # display
                 if not only_synth:
-                    display_width = int(4/3*display_height)
+                    # Let's vertically concatenate the input image and the synthesized image
                     # Resize input image from the camera
-                    img = cv2.resize(image, (display_width, display_height))
-                    w, h = display_width, display_height
+                    img_width = display_height
+                    img_height = int(img_width * height / width) 
+                    img = cv2.resize(image, (img_width, img_height))
+                    w, h = img_width, img_height
+
                     # Resize accordingly the synthesized image
                     simg = cv2.resize(simg, (display_height, display_height), interpolation=cv2.INTER_CUBIC)
-                    w += h
-                    img = np.concatenate((img, simg), axis=1)
+                    h += display_height
+
+                    # Concatenate and show the images
+                    img = np.concatenate((simg, img), axis=0)
                     cv2.imshow('Visuorreactive Demo', img)
+
+                    # display_width = int(4/3*display_height)
+                    # Resize input image from the camera
+                    # img = cv2.resize(image, (display_width, display_height))
+                    # w, h = display_width, display_height
+                    # Resize accordingly the synthesized image
+                    # simg = cv2.resize(simg, (display_height, display_height), interpolation=cv2.INTER_CUBIC)
+                    # w += h
+                    # img = np.concatenate((img, simg), axis=1)
+                    # cv2.imshow('Visuorreactive Demo', img)
                 else:
                     # Resize the synthesized image to the desired display height/width
                     simg = cv2.resize(simg, (display_height, display_height))
@@ -453,7 +503,7 @@ def live_visual_reactive(
                     if not recording_flag:
                         print('Recording started')
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        out = cv2.VideoWriter('visualreactive_affinematrix_v2.mp4', fourcc, fps, (w, h))
+                        out = cv2.VideoWriter(f'visualreactive_input_v2_{model_type}.mp4', fourcc, fps, (w, h))
                         recording_flag = True
                     else:
                         print('Recording stopped')
@@ -467,8 +517,8 @@ def live_visual_reactive(
     elif v3:
         # Set number of rows and columns for the generated "mirror"
         num_frames = 900
-        nrows = 10
-        ncols = 10
+        nrows = 16
+        ncols = 20
         shape = [num_frames, nrows * ncols, G.z_dim]
         # Generate a loop of images
         all_latents = np.random.RandomState(seed).randn(*shape).astype(np.float32)
@@ -521,5 +571,11 @@ def live_visual_reactive(
         cam.release()
 
 
+# ----------------------------------------------------------------------------
+
+
 if __name__ == '__main__':
     live_visual_reactive()
+
+
+# ----------------------------------------------------------------------------
