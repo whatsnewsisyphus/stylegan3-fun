@@ -104,7 +104,7 @@ def gen_interp_video(G,
             G.synthesis.input.affine.weight.data.zero_()
 
     # Get the Generator's transform
-    m = G.synthesis.input.transform
+    m = G.synthesis.input.transform if hasattr(G.synthesis, 'input') else None
 
     if num_keyframes is None:
         if len(seeds) % (grid_w*grid_h) != 0:
