@@ -179,7 +179,7 @@ def load_network(name: str, network_pkl: Union[str, os.PathLike], cfg: Optional[
     """Load and return the discriminator D from a trained network."""
     # Define the model
     if cfg is not None:
-        assert network_pkl in resume_specs[cfg], f'This model is not available for config {cfg}!'
+        assert network_pkl in resume_specs[cfg], f'{network_pkl} is not available for config {cfg}!'
         network_pkl = resume_specs[cfg][network_pkl]
     print(f'Loading networks from "{network_pkl}"...')
     with dnnlib.util.open_url(network_pkl) as f:

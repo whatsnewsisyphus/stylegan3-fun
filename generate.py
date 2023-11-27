@@ -613,7 +613,7 @@ def circular_video(
     device = torch.device('cuda')
 
     # Load the network
-    G = gen_utils.load_network('G_ema', network_pkl, cfg, device)
+    G = gen_utils.load_network(name='G_ema', network_pkl=network_pkl, cfg=cfg, device=device)
 
     # Get the constant input
     if aydao_flesh_digression:
