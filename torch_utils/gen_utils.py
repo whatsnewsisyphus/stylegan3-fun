@@ -10,7 +10,12 @@ import click
 import numpy as np
 import torch
 
-import dnnlib
+try:
+    import dnnlib
+except ImportError:
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..',))
+    import dnnlib
 import legacy
 
 
@@ -179,7 +184,7 @@ def load_network(name: str, network_pkl: Union[str, os.PathLike], cfg: Optional[
     """Load and return the discriminator D from a trained network."""
     # Define the model
     if cfg is not None:
-        assert network_pkl in resume_specs[cfg], f'{network_pkl} is not available for config {cfg}!'
+        assert network_pkl in resume_specs[cfg], f'{network_pkl} is not available for config {cfg}! \nAvailable models: {resume_specs[cfg]}'
         network_pkl = resume_specs[cfg][network_pkl]
     print(f'Loading networks from "{network_pkl}"...')
     with dnnlib.util.open_url(network_pkl) as f:
@@ -245,7 +250,7 @@ def compress_video(
         original_video: Union[str, os.PathLike],
         original_video_name: Union[str, os.PathLike],
         outdir: Union[str, os.PathLike],
-        ctx: click.Context) -> None:
+        ctx: click.Context = None) -> None:
     """ Helper function to compress the original_video using ffmpeg-python. moviepy creates huge videos, so use
         ffmpeg to 'compress' it (won't be perfect, 'compression' will depend on the video dimensions). ffmpeg
         can also be used to e.g. resize the video, make a GIF, save all frames in the video to the outdir, etc.
@@ -253,7 +258,10 @@ def compress_video(
     try:
         import ffmpeg
     except (ModuleNotFoundError, ImportError):
-        ctx.fail('Missing ffmpeg! Install it via "pip install ffmpeg-python"')
+        if ctx is not None:
+            ctx.fail('Missing ffmpeg! Install it via "pip install ffmpeg-python"')
+        else:
+            raise ImportError('ffmpeg-python not found! Install it via "pip install ffmpeg-python"')
 
     print('Compressing the video...')
     resized_video_name = os.path.join(outdir, f'{original_video_name}-compressed.mp4')
@@ -671,7 +679,7 @@ def z_to_img(G, latents: torch.Tensor, label: torch.Tensor, truncation_psi: floa
     return img
 
 
-def get_w_from_seed(G, device: torch.device, seed: int, truncation_psi: float, new_w_avg: torch.Tensor = None) -> torch.Tensor:
+def get_w_from_seed(G, device: Union[str, torch.device], seed: int, truncation_psi: float, new_w_avg: torch.Tensor = None) -> torch.Tensor:
     """Get the dlatent from a random seed, using the truncation trick (this could be optional)"""
     z = np.random.RandomState(seed).randn(1, G.z_dim)
     w = G.mapping(torch.from_numpy(z).to(device), None)
