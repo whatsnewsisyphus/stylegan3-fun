@@ -300,6 +300,9 @@ class Renderer:
         torch.manual_seed(random_seed)
         out, layers = self.run_synthesis_net(G.synthesis, w, capture_layer=layer_name, **synthesis_kwargs)
 
+        # Store the current latent.
+        res.w = w
+
         # Print layer details.
         if available_layers:
             for layer in layers:

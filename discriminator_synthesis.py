@@ -92,6 +92,13 @@ def get_image(seed: int = 0,
     return image, starting_image
 
 
+def get_3d_perlin_noise(seed: int,
+                        image_size: int,
+                        convert_to_grayscale: bool,
+                        device: torch.device) -> Tuple[np.ndarray, str]:
+    pass
+
+
 def crop_resize_rotate(img: PIL.Image.Image,
                        crop_size: int = None,
                        new_size: int = None,
@@ -261,7 +268,7 @@ class StyleLoss(nn.Module):
         return input
 
 
-@main.command(name='style-transfer', help='Use the StyleGAN2/3 Discriminator to perform style transfer')
+@main.command(name='dream-transfer', help='Use the StyleGAN2/3 Discriminator to perform style transfer')
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
 @click.option('--content', type=str, help='Content image filename (url or local path)', required=True)

@@ -64,6 +64,7 @@ def setup_generator(network_pkl: str, device: str, cfg: Optional[str], anchor_la
     return G
 
 
+# TODO: change to setup_backbone, let's test with EfficientNet-B0, for example
 def setup_vgg16(device: str):
     """Set up VGG16 feature extractor."""
     print('Loading VGG16 and its features...')
@@ -91,8 +92,8 @@ def setup_mediapipe():
 
 
 class CircleObject:
-    MU: float = 0.995  # Friction factor; 1 is no friction
-    RHO: float = 0.05  # Density of the circle; mass = density * area
+    MU: float = 0.995  # Friction factor; 1 is a "frictionless surface"
+    RHO: float = 0.05  # Density of the circle to be used to calculate the mass
 
     def __init__(self, position: Union[list, tuple, np.ndarray], radius: int,
                  initial_velocity: Union[list, tuple, np.ndarray], screen_width: int = 1280,
@@ -112,7 +113,7 @@ class CircleObject:
         self.velocity = self.initial_velocity.copy()
         self.radius = radius
         self.color = tuple(color) if isinstance(color, np.ndarray) else color
-        self.mass = self.RHO * np.pi * self.radius ** 2  # Proportional to its area: m = rho * A := density * area
+        self.mass = self.RHO * np.pi * self.radius ** 2  # m = rho * A := density * area
 
         # Save the screen dimensions for spawning purposes
         self.screen_width = screen_width
@@ -219,6 +220,12 @@ def create_circle(existing_circles, screen_width, screen_height, max_attempts=10
 
 # Main processing functions (to be implemented)
 def process_v0(frame, vgg16_features, G, static_w, layer, label):
+    """
+    Base visual-reactive interpolation: encode image w/VGG16 (for now),
+    which yields a "fake" dlatent that we will use with the Generator. To
+    enhance variability of the output, we will use style mixing with a 
+    static latent.
+    """
     fake_z = vgg16_features.get_layers_features(frame, layers=[layer])[0]
     fake_z = fake_z.view(1, 512, -1).mean(2)
     fake_w = gen_utils.z_to_dlatent(G, fake_z, label, 1.0)
@@ -227,6 +234,12 @@ def process_v0(frame, vgg16_features, G, static_w, layer, label):
 
 
 def process_v1(frame, vgg16_features, G, layer, label, device):
+    """
+    Same as v0, except now we separate the top half of the image to control
+    the "coarse" latent features, the bottom left to control the "middle", and
+    the bottom right to control the "fine" features of the fake latent vector
+    prior to do the style mixing.
+    """
     fake_z = vgg16_features.get_layers_features(frame, layers=[layer])[0]
     _n, _c, h, w = fake_z.shape
     coarse_fake_z = fake_z[:, :, :h // 2, :]
@@ -248,6 +261,10 @@ first_run = True
 
 def process_v2(G, latent, mp_hands, image, label, const_input: torch.Tensor = None,
                const_input_interpolation: torch.Tensor = None, show_landmarks: bool = False):
+    """
+    Corrupt the learned constants. For StyleGAN2, corrupt the constant input vector towards a random one.
+    For StyleGAN3, change the learned affine transformation (translate, rotate, ...). One hand only.
+    """
     global prev_angle, prev_x, prev_y, prev_z, prev_dist, prev_hand_area, first_run
 
     image.flags.writeable = False
@@ -328,6 +345,7 @@ def process_v2(G, latent, mp_hands, image, label, const_input: torch.Tensor = No
                 image,
                 hand_landmarks,
                 mp.solutions.hands.HAND_CONNECTIONS)
+        # TODO: show the landmarks with some transparency and add the center (x, y).
 
     generated_image = gen_utils.z_to_img(G, latent, label, truncation_psi=0.7, noise_mode='const')[0]
 
@@ -335,6 +353,10 @@ def process_v2(G, latent, mp_hands, image, label, const_input: torch.Tensor = No
 
 prev_thumb_dist, prev_index_dist, prev_middle_dist, prev_ring_dist, prev_pinky_dist, first_run = 0.0, 0.0, 0.0, 0.0, 0.0, True
 def process_v3(G, latent, mp_hands, image, label, components: torch.Tensor, show_landmarks: bool = False):
+    """
+    Let each finger position/distance to the hand center dictate how much to move in the
+    Principal Component (PC) of the latent space of the Generator. TODO: make it work lol
+    """
     global prev_thumb_dist, prev_index_dist, prev_middle_dist, prev_ring_dist, prev_pinky_dist, first_run
 
     image.flags.writeable = False
@@ -406,6 +428,7 @@ def process_v3(G, latent, mp_hands, image, label, components: torch.Tensor, show
     latent_manipulated = latent_manipulated + (pc_adjustments @ components.float().T)
 
     # Draw hand landmarks if requested
+    # TODO: create a util function for this, and add viz of center as in v2
     if show_landmarks and results.multi_hand_landmarks:
         image.flags.writeable = True
         for hand_landmarks in results.multi_hand_landmarks:
@@ -420,6 +443,10 @@ def process_v3(G, latent, mp_hands, image, label, components: torch.Tensor, show
 
 
 def process_v4(G, latent, mp_hands, image, label, circles, show_landmarks: bool = False):
+    """
+    "Kinetic" interpolation: let the total momentum of the bouncing circles dictate the
+    truncation psi that the Generator will use. In other words, its expressivity.
+    """
     results = mp_hands.process(image)
 
     if results.multi_hand_landmarks:
@@ -461,6 +488,8 @@ def process_v4(G, latent, mp_hands, image, label, circles, show_landmarks: bool 
     img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
     img = img[0].cpu().numpy()
 
+    # TODO: same as v2 and v3, add hand landmarks
+
     return img, image
 
 
@@ -471,8 +500,8 @@ def process_v4(G, latent, mp_hands, image, label, circles, show_landmarks: bool 
 def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device, layer, static_w,
               label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror):
 
-    # Get the principal components, if we use mode 'v3'
     if mode == 'v3':
+        # Get the principal components, if we use mode 'v3'
         z = torch.randn(10000, G.z_dim, device=device)
         w = G.mapping(z, label, truncation_psi=1.0)[:, 0].detach().cpu()
         scaler = StandardScaler()
@@ -488,9 +517,10 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
         components = torch.from_numpy(components).to(device).T
 
     if mode == 'v4':
-        num_circles = 7
+        num_circles = 3
         circles = []
         for i in range(num_circles):
+            # Spawn a circle at a time to (best) avoid collision
             create_circle(circles, int(4 / 3 * display_height), display_height)
 
     # Preprocess the image
@@ -515,6 +545,7 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
             img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).unsqueeze(0).float().to(device)
             frame = preprocess(img_tensor / 255.0)
 
+        # Pass the arguments to the selected mode
         if mode == 'v0':
             fake_w = process_v0(frame, vgg16_features, G, static_w, layer, label)
             simg = gen_utils.w_to_img(G, fake_w, noise_mode='const')[0]
