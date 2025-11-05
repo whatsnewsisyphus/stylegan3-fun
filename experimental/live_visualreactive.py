@@ -493,12 +493,108 @@ def process_v4(G, latent, mp_hands, image, label, circles, show_landmarks: bool 
     return img, image
 
 
+prev_v5_dist, prev_v5_angle, first_run_v5 = 0.0, 0.0, True
+
+
+def process_v5(G, w_base, w_coarse, w_fine, mp_hands, image, label, truncation_psi: float = 0.7,
+               show_landmarks: bool = False):
+    """
+    Hand-based latent mixing: mix coarse and fine features from two static latent vectors into a base latent.
+    - Hand distance from center (0-1) controls mixing strength of coarse features (layers 0-3)
+    - Hand orientation (angle) controls mixing strength of fine features (layers 8+)
+    """
+    global prev_v5_dist, prev_v5_angle, first_run_v5
+
+    image.flags.writeable = False
+    results = mp_hands.process(image)
+
+    # EMA alpha value (adjust as needed)
+    alpha = 0.15
+
+    dist, angle = 0.0, 0.0
+
+    if results.multi_hand_landmarks:
+        hand = results.multi_hand_landmarks[0]
+
+        # Get hand orientation (angle)
+        base = hand.landmark[0]
+        middle = hand.landmark[9]
+
+        dx = middle.x - base.x
+        dy = middle.y - base.y
+        angle = np.pi / 2 + np.arctan2(dy, dx)
+
+        # Get the center of the hand
+        x, y, z = np.mean([[lm.x, lm.y, lm.z] for lm in hand.landmark], axis=0)
+
+        # Center coordinates (0.5, 0.5 is center of screen)
+        x = x - 0.5
+        y = y - 0.5
+
+        # Distance from center (normalized to 0-1 range)
+        dist = np.sqrt(x ** 2 + y ** 2)
+        dist = dist * 4 * 2 ** 0.5  # Scale up to get a better range
+        dist = max(0.0, min(dist, 1.0))  # Clamp between 0.0 and 1.0
+
+        # Apply EMA when hand is detected
+        if not first_run_v5:
+            angle = alpha * angle + (1 - alpha) * prev_v5_angle
+            dist = alpha * dist + (1 - alpha) * prev_v5_dist
+    else:
+        # Apply EMA towards zero when no hand is detected
+        if not first_run_v5:
+            angle = (1 - alpha) * prev_v5_angle
+            dist = (1 - alpha) * prev_v5_dist
+        else:
+            angle, dist = 0.0, 0.0
+
+    # Update previous values
+    prev_v5_angle, prev_v5_dist = angle, dist
+    first_run_v5 = False
+
+    # Create mixed latent
+    w_mixed = w_base.clone()
+
+    # Mix coarse features (layers 0-3) based on distance
+    coarse_mix_strength = dist
+    w_mixed[:, 0:4] = (1 - coarse_mix_strength) * w_base[:, 0:4] + coarse_mix_strength * w_coarse[:, 0:4]
+
+    # Mix fine features (layers 8+) based on orientation (normalize angle to 0-1)
+    fine_mix_strength = (angle % (2 * np.pi)) / (2 * np.pi)
+    w_mixed[:, 8:] = (1 - fine_mix_strength) * w_base[:, 8:] + fine_mix_strength * w_fine[:, 8:]
+
+    # Draw hand landmarks if requested
+    if show_landmarks and results.multi_hand_landmarks:
+        image.flags.writeable = True
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp.solutions.drawing_utils.draw_landmarks(
+                image,
+                hand_landmarks,
+                mp.solutions.hands.HAND_CONNECTIONS)
+        # Draw center point and distance indicator
+        center_x, center_y = int(image.shape[1] / 2), int(image.shape[0] / 2)
+        cv2.circle(image, (center_x, center_y), 5, (255, 0, 0), -1)  # Blue center point
+
+        # Draw hand center
+        if results.multi_hand_landmarks:
+            hand_center_x = int(np.mean([lm.x for lm in results.multi_hand_landmarks[0].landmark]) * image.shape[1])
+            hand_center_y = int(np.mean([lm.y for lm in results.multi_hand_landmarks[0].landmark]) * image.shape[0])
+            cv2.circle(image, (hand_center_x, hand_center_y), 5, (0, 255, 255), -1)  # Yellow hand center
+            cv2.line(image, (center_x, center_y), (hand_center_x, hand_center_y), (0, 255, 255), 2)  # Line from center to hand
+
+    # Generate the image
+    generated_image = gen_utils.w_to_img(G, w_mixed, truncation_psi=truncation_psi)[0]
+
+    return generated_image, image
+
+
 # ----------------------------------------------------------------------------
 
 
 # Main loop function
 def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device, layer, static_w,
-              label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror):
+              label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror,
+              w_base=None, w_coarse=None, w_fine=None, truncation_psi=0.7):
 
     if mode == 'v3':
         # Get the principal components, if we use mode 'v3'
@@ -564,6 +660,8 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
                 G, dlatent, mp_hands, img, label, components, show_landmarks)
         elif mode == 'v4':
             simg, img = process_v4(G, all_latents[c % len(all_latents)], mp_hands, img, label, circles, show_landmarks)
+        elif mode == 'v5':
+            simg, img = process_v5(G, w_base, w_coarse, w_fine, mp_hands, img, label, truncation_psi, show_landmarks)
         else:
             raise ValueError(f"Mode {mode} not recognized.")
 
@@ -628,6 +726,8 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 @click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
 # Synthesis options (feed a list of seeds or give the projected w to synthesize)
 @click.option('--seed', type=click.INT, help='Random seed to use for static synthesized image', default=0, show_default=True)
+@click.option('--coarse-seed', type=click.INT, help='Random seed for coarse features source (v5 mode only)', default=1, show_default=True)
+@click.option('--fine-seed', type=click.INT, help='Random seed for fine features source (v5 mode only)', default=2, show_default=True)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=0.6, show_default=True)
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)', default=None, show_default=True)
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
@@ -641,7 +741,7 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 @click.option('--face', 'face_tracking', type=bool, help='Use face tracking', default=False, show_default=True)
 @click.option('--body', 'body_tracking', type=bool, help='Use body tracking', default=False, show_default=True)
 # How to set the fake dlatent
-@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4']), required=True)
+@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5']), required=True)
 # TODO: intermediate layers?
 # Video options
 @click.option('--display-height', type=parse_height, help="Height of the display window; if 'max', will use G.img_resolution", default=None, show_default=True)
@@ -660,6 +760,8 @@ def live_visual_reactive(
         device: Optional[str],
         cfg: str,
         seed: int,
+        coarse_seed: int,
+        fine_seed: int,
         truncation_psi: float,
         class_idx: int,
         noise_mode: str,
@@ -695,11 +797,21 @@ def live_visual_reactive(
 
     vgg16_features = setup_vgg16(device) if mode in ['v0', 'v1'] else None
     cam, height, width = setup_camera(demo_height, demo_width)
-    mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4'] else (None, None, None)
+    mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4', 'v5'] else (None, None, None)
 
     display_height = G.img_resolution if display_height is None or display_height == 'max' else display_height
 
     static_w = gen_utils.get_w_from_seed(G, device, seed, truncation_psi) if mode == 'v0' else None
+
+    # Generate latent vectors for v5 mode
+    if mode == 'v5':
+        w_base = gen_utils.get_w_from_seed(G, device, seed, truncation_psi)
+        w_coarse = gen_utils.get_w_from_seed(G, device, coarse_seed, truncation_psi)
+        w_fine = gen_utils.get_w_from_seed(G, device, fine_seed, truncation_psi)
+    else:
+        w_base = None
+        w_coarse = None
+        w_fine = None
 
     if mode in ['v2', 'v4']:
         num_frames = 900
@@ -727,7 +839,8 @@ def live_visual_reactive(
         const_input_interpolation = None
 
     main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device,
-              layer, static_w, label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror)
+              layer, static_w, label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror,
+              w_base, w_coarse, w_fine, truncation_psi)
 
 
 # ----------------------------------------------------------------------------
