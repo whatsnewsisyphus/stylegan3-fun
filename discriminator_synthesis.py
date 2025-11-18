@@ -379,7 +379,7 @@ def discriminator_dream(
         image_noise: str,
         starting_image: Union[str, os.PathLike],
         convert_to_grayscale: bool,
-        class_idx: Optional[int],  # TODO: conditional model
+        class_idx: Optional[int],  # For conditional models (not yet implemented)
         learning_rate: float,
         iterations: int,
         layers: str,
@@ -572,7 +572,7 @@ def discriminator_dream_zoom(
         image_noise: Optional[str],
         starting_image: Optional[Union[str, os.PathLike]],
         convert_to_grayscale: bool,
-        class_idx: Optional[int],  # TODO: conditional model
+        class_idx: Optional[int],  # For conditional models (not yet implemented)
         learning_rate: float,
         iterations: int,
         layers: str,
@@ -741,7 +741,7 @@ def channel_zoom(
         image_noise: Optional[str],
         starting_image: Optional[Union[str, os.PathLike]],
         convert_to_grayscale: bool,
-        class_idx: Optional[int],  # TODO: conditional model
+        class_idx: Optional[int],  # For conditional models (not yet implemented)
         learning_rate: float,
         iterations: int,
         layer: str,
@@ -919,7 +919,7 @@ def random_interpolation(
         image_noise: Optional[str],
         starting_image: Optional[Union[str, os.PathLike]],
         convert_to_grayscale: bool,
-        class_idx: Optional[int],  # TODO: conditional model
+        class_idx: Optional[int],  # For conditional models (not yet implemented)
         learning_rate: float,
         iterations: int,
         layers: str,
@@ -934,8 +934,12 @@ def random_interpolation(
         outdir: Union[str, os.PathLike],
         description: str,
 ):
-    """Do a latent walk between random Perlin images (given the seeds) and generate a video with these frames."""
-    # TODO: To make this better and more stable, we generate Perlin noise animations, not interpolations
+    """
+    Interpolate between random Perlin images and apply DeepDream.
+
+    Note: For better temporal coherence, use the 'dream-video' command which
+    generates true 3D Perlin noise instead of interpolating between 2D slices.
+    """
     # Set up device
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
