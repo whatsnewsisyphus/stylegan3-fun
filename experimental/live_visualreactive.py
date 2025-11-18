@@ -247,6 +247,40 @@ def calculate_hand_area(hand_landmarks) -> float:
     return max(0.0, min(hand_area, 1.0))
 
 
+def calculate_hand_openness(hand_landmarks) -> float:
+    """
+    Calculate how open/spread the hand is based on finger distances.
+
+    Args:
+        hand_landmarks: MediaPipe hand landmarks
+
+    Returns:
+        Openness value (0-1 range, 0=closed fist, 1=open palm)
+    """
+    # Get fingertip landmarks
+    fingertips = [
+        hand_landmarks.landmark[4],   # Thumb
+        hand_landmarks.landmark[8],   # Index
+        hand_landmarks.landmark[12],  # Middle
+        hand_landmarks.landmark[16],  # Ring
+        hand_landmarks.landmark[20]   # Pinky
+    ]
+
+    # Calculate average distance between consecutive fingertips
+    distances = []
+    for i in range(len(fingertips) - 1):
+        dist = np.sqrt(
+            (fingertips[i].x - fingertips[i+1].x) ** 2 +
+            (fingertips[i].y - fingertips[i+1].y) ** 2
+        )
+        distances.append(dist)
+
+    avg_distance = np.mean(distances)
+    # Normalize: typical open hand has ~0.3 distance, closed has ~0.05
+    openness = (avg_distance - 0.05) / (0.3 - 0.05)
+    return max(0.0, min(openness, 1.0))
+
+
 def draw_hand_landmarks(image, results, show_center: bool = False,
                        show_distance_line: bool = False):
     """
@@ -661,6 +695,7 @@ def process_v5(G, w_base, w_coarse, w_fine, mp_hands, image, label, truncation_p
 
 
 _ema_v6 = EMAFilter(alpha=0.15)
+_ema_v7 = EMAFilter(alpha=0.15)
 
 
 def process_v6(G1, G2, latent, mp_hands, image, label, mix_layers: List[int],
@@ -779,6 +814,214 @@ def process_v6(G1, G2, latent, mp_hands, image, label, mix_layers: List[int],
     return generated_image, image
 
 
+def process_v7(G, G2, base_latent, mp_hands, image, label, truncation_psi: float = 0.7,
+               show_landmarks: bool = False):
+    """
+    🎪 Latent Playground - A discovery-based multi-hand interaction mode.
+
+    No instructions given - users must explore and discover what each gesture does.
+    Multiple hands create emergent interactions. Mix everything. Play. Discover.
+
+    Hint: Try different numbers of hands, positions, rotations, and openness...
+    """
+    image.flags.writeable = False
+    results = mp_hands.process(image)
+
+    # Default parameters
+    num_hands = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
+
+    # Base latent to manipulate
+    w = G.mapping(base_latent, label, truncation_psi=truncation_psi)
+
+    # Extract features from all detected hands
+    hand_features = []
+    if results.multi_hand_landmarks:
+        for hand_idx, hand in enumerate(results.multi_hand_landmarks):
+            center = get_hand_center(hand)
+            angle = get_hand_angle(hand)
+            dist_from_center = get_hand_distance_from_center(center[:2])
+            openness = calculate_hand_openness(hand)
+
+            # Apply EMA for smooth transitions
+            center_x = _ema_v7.update(f'hand{hand_idx}_cx', center[0])
+            center_y = _ema_v7.update(f'hand{hand_idx}_cy', center[1])
+            angle = _ema_v7.update(f'hand{hand_idx}_angle', angle)
+            dist = _ema_v7.update(f'hand{hand_idx}_dist', dist_from_center)
+            openness = _ema_v7.update(f'hand{hand_idx}_open', openness)
+
+            hand_features.append({
+                'center': (center_x, center_y, center[2]),
+                'angle': angle,
+                'distance': dist,
+                'openness': openness,
+                'height': center_y  # Y position (0=top, 1=bottom)
+            })
+    else:
+        # Decay all values when no hands detected
+        for hand_idx in range(2):  # Support up to 2 hands
+            _ema_v7.update(f'hand{hand_idx}_cx', 0.5, decay_to_zero=False)
+            _ema_v7.update(f'hand{hand_idx}_cy', 0.5, decay_to_zero=False)
+            _ema_v7.update(f'hand{hand_idx}_angle', 0.0, decay_to_zero=True)
+            _ema_v7.update(f'hand{hand_idx}_dist', 0.0, decay_to_zero=True)
+            _ema_v7.update(f'hand{hand_idx}_open', 0.5, decay_to_zero=False)
+
+    # === EMERGENT INTERACTIONS (Users discover these) ===
+
+    w_modified = w.clone()
+    dynamic_psi = truncation_psi
+
+    if num_hands == 0:
+        # No hands: gentle drift (decay to base state)
+        pass
+
+    elif num_hands == 1:
+        # Single hand: Navigate latent space
+        h = hand_features[0]
+
+        # Hand position affects latent direction (coarse layers)
+        # Center position creates a directional vector
+        dx = (h['center'][0] - 0.5) * 2  # -1 to 1
+        dy = (h['center'][1] - 0.5) * 2
+
+        # Distance from center affects intensity
+        intensity = h['distance'] * 3.0
+
+        # Angle affects which dimensions are modulated
+        angle_factor = h['angle'] / (2 * np.pi)
+
+        # Openness affects truncation psi (detail level)
+        # Open hand = more details, closed = smoother
+        dynamic_psi = truncation_psi * (0.5 + h['openness'])
+
+        # Modify coarse layers based on position
+        direction = torch.randn_like(w_modified[:, :4]) * intensity * 0.1
+        w_modified[:, :4] += direction * dx
+
+        # Modify middle layers based on angle
+        middle_shift = torch.randn_like(w_modified[:, 4:8]) * intensity * 0.05
+        w_modified[:, 4:8] += middle_shift * angle_factor
+
+        # Modify fine layers based on distance
+        fine_shift = torch.randn_like(w_modified[:, 8:]) * h['distance'] * 0.03
+        w_modified[:, 8:] += fine_shift
+
+    elif num_hands >= 2:
+        # Two hands: Model/latent mixing mode
+        h1, h2 = hand_features[0], hand_features[1]
+
+        # Distance between hands controls mixing strength
+        hand_dist = np.sqrt(
+            (h1['center'][0] - h2['center'][0]) ** 2 +
+            (h1['center'][1] - h2['center'][1]) ** 2
+        )
+        mix_strength = 1.0 - min(hand_dist / np.sqrt(2), 1.0)
+        mix_strength = _ema_v7.update('two_hand_mix', mix_strength)
+
+        # Average openness affects overall detail level
+        avg_openness = (h1['openness'] + h2['openness']) / 2
+        dynamic_psi = truncation_psi * (0.5 + avg_openness)
+
+        # If we have G2, mix between models
+        if G2 is not None:
+            w2 = G2.mapping(base_latent, label, truncation_psi=dynamic_psi)
+
+            # Mix based on hand distance
+            # Also use hand heights to determine which layers to mix
+            h1_layer_start = int(h1['height'] * G.mapping.num_ws)
+            h2_layer_end = int(h2['height'] * G.mapping.num_ws)
+
+            mix_start = min(h1_layer_start, h2_layer_end)
+            mix_end = max(h1_layer_start, h2_layer_end)
+
+            # Mix the determined layers
+            for i in range(mix_start, min(mix_end, w.shape[1])):
+                w_modified[:, i] = (1 - mix_strength) * w[:, i] + mix_strength * w2[:, i]
+        else:
+            # Without G2, create latent interpolation
+            # Generate a second latent vector influenced by second hand
+            offset = torch.randn_like(base_latent) * (h2['distance'] * 2.0)
+            latent2 = base_latent + offset
+            w2 = G.mapping(latent2, label, truncation_psi=dynamic_psi)
+
+            # Mix based on angles and distances
+            angle_diff = abs(h1['angle'] - h2['angle'])
+            angle_mix = angle_diff / (2 * np.pi)
+
+            # Selective layer mixing based on hand positions
+            for i in range(w.shape[1]):
+                layer_factor = i / w.shape[1]
+                # Use hand heights to create zones of influence
+                if h1['height'] < 0.5 and layer_factor < 0.5:
+                    # Top hand affects early layers
+                    w_modified[:, i] = (1 - mix_strength) * w[:, i] + mix_strength * w2[:, i]
+                elif h2['height'] > 0.5 and layer_factor > 0.5:
+                    # Bottom hand affects late layers
+                    w_modified[:, i] = (1 - mix_strength * angle_mix) * w[:, i] + (mix_strength * angle_mix) * w2[:, i]
+
+    # Regenerate with modified latent and dynamic truncation
+    img = G.synthesis(w_modified, noise_mode='const')
+    img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+    generated_image = img[0].cpu().numpy()
+
+    # Visualization: Show cryptic, colorful feedback
+    if show_landmarks:
+        image.flags.writeable = True
+
+        # Draw hand landmarks with custom colors per hand
+        colors = [(255, 100, 100), (100, 100, 255), (100, 255, 100), (255, 255, 100)]
+
+        if results.multi_hand_landmarks:
+            for hand_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                # Draw landmarks
+                mp.solutions.drawing_utils.draw_landmarks(
+                    image,
+                    hand_landmarks,
+                    mp.solutions.hands.HAND_CONNECTIONS)
+
+                # Draw hand center with unique color
+                h = hand_features[hand_idx]
+                cx = int(h['center'][0] * image.shape[1])
+                cy = int(h['center'][1] * image.shape[0])
+                color = colors[hand_idx % len(colors)]
+
+                # Openness affects circle size
+                radius = int(5 + h['openness'] * 15)
+                cv2.circle(image, (cx, cy), radius, color, -1)
+
+                # Draw distance trail (visual feedback for distance from center)
+                center_x, center_y = image.shape[1] // 2, image.shape[0] // 2
+                alpha = int(h['distance'] * 255)
+                cv2.line(image, (center_x, center_y), (cx, cy), color, 1)
+
+            # If two hands, show connection
+            if num_hands >= 2:
+                h1, h2 = hand_features[0], hand_features[1]
+                cx1 = int(h1['center'][0] * image.shape[1])
+                cy1 = int(h1['center'][1] * image.shape[0])
+                cx2 = int(h2['center'][0] * image.shape[1])
+                cy2 = int(h2['center'][1] * image.shape[0])
+
+                # Connection line with gradient
+                hand_dist = np.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2)
+                max_dist = np.sqrt(image.shape[1] ** 2 + image.shape[0] ** 2)
+                thickness = max(1, int((1 - hand_dist / max_dist) * 10))
+                cv2.line(image, (cx1, cy1), (cx2, cy2), (200, 200, 0), thickness)
+
+        # Show cryptic hint text
+        hints = [
+            "∞ hands shape reality ∞",
+            "⟲ rotate for color ⟳",
+            "⇄ distance is strength ⇆",
+            "✋ open for detail 👊",
+            "⚡ two hands unlock fusion ⚡"
+        ]
+        hint = hints[num_hands % len(hints)]
+        cv2.putText(image, hint, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+    return generated_image, image
+
+
 # ----------------------------------------------------------------------------
 
 
@@ -856,6 +1099,9 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
         elif mode == 'v6':
             latent = all_latents[c % len(all_latents)]
             simg, img = process_v6(G, G2, latent, mp_hands, img, label, mix_layer_indices, truncation_psi, show_landmarks)
+        elif mode == 'v7':
+            latent = all_latents[c % len(all_latents)]
+            simg, img = process_v7(G, G2, latent, mp_hands, img, label, truncation_psi, show_landmarks)
         else:
             raise ValueError(f"Mode {mode} not recognized.")
 
@@ -937,7 +1183,7 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 @click.option('--face', 'face_tracking', type=bool, help='Use face tracking', default=False, show_default=True)
 @click.option('--body', 'body_tracking', type=bool, help='Use body tracking', default=False, show_default=True)
 # How to set the fake dlatent
-@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6']), required=True)
+@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7']), required=True)
 @click.option('--mix-layers', type=str, help='Layers to mix for v6 mode (e.g., "coarse", "middle", "fine", "all", "0-4")', default='all', show_default=True)
 # TODO: intermediate layers?
 # Video options
@@ -986,15 +1232,19 @@ def live_visual_reactive(
 
     G = setup_generator(network_pkl, device, cfg, anchor_latent_space)
 
-    # Load second generator for v6 mode
-    if mode == 'v6':
-        if network_pkl2 is None:
-            raise ValueError("v6 mode requires --network2 parameter")
-        print('Loading second generator for model mixing...')
-        G2 = setup_generator(network_pkl2, device, cfg2 if cfg2 else cfg, anchor_latent_space)
-        # Check compatibility
-        if G.img_resolution != G2.img_resolution:
-            raise ValueError(f"Models must have same resolution. G1: {G.img_resolution}, G2: {G2.img_resolution}")
+    # Load second generator for v6 or v7 mode
+    if mode in ['v6', 'v7']:
+        if network_pkl2 is not None:
+            print('Loading second generator for model mixing...')
+            G2 = setup_generator(network_pkl2, device, cfg2 if cfg2 else cfg, anchor_latent_space)
+            # Check compatibility
+            if G.img_resolution != G2.img_resolution:
+                raise ValueError(f"Models must have same resolution. G1: {G.img_resolution}, G2: {G2.img_resolution}")
+        else:
+            if mode == 'v6':
+                raise ValueError("v6 mode requires --network2 parameter")
+            print('v7 mode: Running with single model (latent mixing only)')
+            G2 = None
     else:
         G2 = None
 
@@ -1009,7 +1259,7 @@ def live_visual_reactive(
 
     vgg16_features = setup_vgg16(device) if mode in ['v0', 'v1'] else None
     cam, height, width = setup_camera(demo_height, demo_width)
-    mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4', 'v5', 'v6'] else (None, None, None)
+    mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4', 'v5', 'v6', 'v7'] else (None, None, None)
 
     display_height = G.img_resolution if display_height is None or display_height == 'max' else display_height
 
@@ -1040,6 +1290,17 @@ def live_visual_reactive(
         all_latents = torch.from_numpy(all_latents).to(device)
     else:
         mix_layer_indices = None
+
+    # Setup for v7 mode (latent playground)
+    if mode == 'v7':
+        print('🎪 Entering the Latent Playground... Explore and discover!')
+        # Create noise loop for continuous variation
+        num_frames = 900
+        shape = [num_frames, 1, G.z_dim]
+        all_latents = np.random.RandomState(seed).randn(*shape).astype(np.float32)
+        all_latents = scipy.ndimage.gaussian_filter(all_latents, sigma=[3.0 * 30, 0, 0], mode='wrap')
+        all_latents /= np.sqrt(np.mean(np.square(all_latents)))
+        all_latents = torch.from_numpy(all_latents).to(device)
 
     if mode in ['v2', 'v4']:
         num_frames = 900
