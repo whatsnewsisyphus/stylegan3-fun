@@ -91,6 +91,171 @@ def setup_mediapipe():
     return mp_hands, mp_drawing, mp_drawing_styles
 
 
+# ----------------------------------------------------------------------------
+# Hand Tracking Utilities
+# ----------------------------------------------------------------------------
+
+
+class EMAFilter:
+    """Exponential Moving Average filter for smoothing values."""
+
+    def __init__(self, alpha: float = 0.15):
+        """
+        Initialize EMA filter.
+
+        Args:
+            alpha: Smoothing factor (0-1). Higher = more responsive, lower = smoother.
+        """
+        self.alpha = alpha
+        self.values = {}
+        self.initialized = {}
+
+    def update(self, name: str, new_value: float, decay_to_zero: bool = False) -> float:
+        """
+        Update and return smoothed value.
+
+        Args:
+            name: Name/key for the value being tracked
+            new_value: New measurement
+            decay_to_zero: If True and new_value is None/0, decay towards zero
+
+        Returns:
+            Smoothed value
+        """
+        if name not in self.initialized:
+            self.values[name] = new_value if new_value is not None else 0.0
+            self.initialized[name] = True
+            return self.values[name]
+
+        if new_value is None or (decay_to_zero and new_value == 0.0):
+            # Decay towards zero
+            self.values[name] = (1 - self.alpha) * self.values[name]
+        else:
+            # Normal EMA update
+            self.values[name] = self.alpha * new_value + (1 - self.alpha) * self.values[name]
+
+        return self.values[name]
+
+    def reset(self):
+        """Reset all tracked values."""
+        self.values = {}
+        self.initialized = {}
+
+
+def get_hand_center(hand_landmarks) -> Tuple[float, float, float]:
+    """
+    Calculate the center of a hand from MediaPipe landmarks.
+
+    Args:
+        hand_landmarks: MediaPipe hand landmarks
+
+    Returns:
+        Tuple of (x, y, z) coordinates
+    """
+    return np.mean([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark], axis=0)
+
+
+def get_hand_angle(hand_landmarks) -> float:
+    """
+    Calculate hand orientation angle from base to middle finger.
+
+    Args:
+        hand_landmarks: MediaPipe hand landmarks
+
+    Returns:
+        Angle in radians
+    """
+    base = hand_landmarks.landmark[0]
+    middle = hand_landmarks.landmark[9]
+    dx = middle.x - base.x
+    dy = middle.y - base.y
+    return np.pi / 2 + np.arctan2(dy, dx)
+
+
+def get_hand_distance_from_center(hand_center: Tuple[float, float],
+                                   normalize: bool = True) -> float:
+    """
+    Calculate distance of hand center from screen center.
+
+    Args:
+        hand_center: (x, y) coordinates of hand center
+        normalize: If True, normalize to 0-1 range
+
+    Returns:
+        Distance value
+    """
+    x = hand_center[0] - 0.5
+    y = hand_center[1] - 0.5
+    dist = np.sqrt(x ** 2 + y ** 2)
+
+    if normalize:
+        dist = dist * 4 * 2 ** 0.5  # Scale up for better range
+        dist = max(0.0, min(dist, 1.0))  # Clamp to [0, 1]
+
+    return dist
+
+
+def calculate_hand_area(hand_landmarks) -> float:
+    """
+    Calculate hand area using trapezoidal rule on key points.
+
+    Args:
+        hand_landmarks: MediaPipe hand landmarks
+
+    Returns:
+        Hand area (0-1 range)
+    """
+    area_points = [hand_landmarks.landmark[i] for i in range(0, 21, 4)]
+    hand_area = 0.0
+    for i in range(len(area_points) - 1):
+        hand_area += (area_points[i].x - area_points[i + 1].x) * (
+                area_points[i].y + area_points[i + 1].y)
+    hand_area += (area_points[-1].x - area_points[0].x) * (area_points[-1].y + area_points[0].y)
+    hand_area = abs(hand_area) / 2
+    return max(0.0, min(hand_area, 1.0))
+
+
+def draw_hand_landmarks(image, results, show_center: bool = False,
+                       show_distance_line: bool = False):
+    """
+    Draw hand landmarks and optional visualization aids.
+
+    Args:
+        image: Image to draw on (will be modified)
+        results: MediaPipe hand tracking results
+        show_center: If True, show screen center and hand center
+        show_distance_line: If True, draw line from screen to hand center
+    """
+    if not results.multi_hand_landmarks:
+        return
+
+    image.flags.writeable = True
+
+    # Draw hand landmarks
+    for hand_landmarks in results.multi_hand_landmarks:
+        mp.solutions.drawing_utils.draw_landmarks(
+            image,
+            hand_landmarks,
+            mp.solutions.hands.HAND_CONNECTIONS)
+
+    # Draw center visualization if requested
+    if show_center and results.multi_hand_landmarks:
+        center_x, center_y = int(image.shape[1] / 2), int(image.shape[0] / 2)
+        cv2.circle(image, (center_x, center_y), 5, (255, 0, 0), -1)  # Blue screen center
+
+        hand_center = get_hand_center(results.multi_hand_landmarks[0])
+        hand_center_x = int(hand_center[0] * image.shape[1])
+        hand_center_y = int(hand_center[1] * image.shape[0])
+        cv2.circle(image, (hand_center_x, hand_center_y), 5, (0, 255, 255), -1)  # Yellow hand center
+
+        if show_distance_line:
+            cv2.line(image, (center_x, center_y), (hand_center_x, hand_center_y),
+                    (0, 255, 255), 2)
+
+
+# ----------------------------------------------------------------------------
+
+
 class CircleObject:
     MU: float = 0.995  # Friction factor; 1 is a "frictionless surface"
     RHO: float = 0.05  # Density of the circle to be used to calculate the mass
@@ -255,8 +420,8 @@ def process_v1(frame, vgg16_features, G, layer, label, device):
     return fake_w
 
 
-prev_angle, prev_x, prev_y, prev_z, prev_dist, prev_hand_area = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-first_run = True
+# State filters for different modes
+_ema_v2 = EMAFilter(alpha=0.15)
 
 
 def process_v2(G, latent, mp_hands, image, label, const_input: torch.Tensor = None,
@@ -265,70 +430,36 @@ def process_v2(G, latent, mp_hands, image, label, const_input: torch.Tensor = No
     Corrupt the learned constants. For StyleGAN2, corrupt the constant input vector towards a random one.
     For StyleGAN3, change the learned affine transformation (translate, rotate, ...). One hand only.
     """
-    global prev_angle, prev_x, prev_y, prev_z, prev_dist, prev_hand_area, first_run
-
     image.flags.writeable = False
     results = mp_hands.process(image)
-
-    # EMA alpha value (adjust as needed)
-    alpha = 0.15
 
     if results.multi_hand_landmarks:
         hand = results.multi_hand_landmarks[0]
 
-        base = hand.landmark[0]
-        middle = hand.landmark[9]
+        # Calculate hand features using helper functions
+        angle = get_hand_angle(hand)
+        x, y, z = get_hand_center(hand)
+        x, y = x - 0.5, y - 0.5
+        dist = get_hand_distance_from_center((x + 0.5, y + 0.5))
+        hand_area = calculate_hand_area(hand)
 
-        dx = middle.x - base.x
-        dy = middle.y - base.y
-        angle = np.pi / 2 + np.arctan2(dy, dx)
-
-        x, y, z = np.mean([[lm.x, lm.y, lm.z] for lm in hand.landmark], axis=0)
-
-        x = x - 0.5
-        y = y - 0.5
-
-        dist = np.sqrt(x ** 2 + y ** 2)
-        dist = dist * 4 * 2 ** 0.5
-        area_points = [hand.landmark[i] for i in range(0, 21, 4)]
-        # hand_area = np.abs(np.sum([(area_points[i].x - area_points[i + 1].x) * (area_points[i].y + area_points[i + 1].y)
-                                   # for i in range(len(area_points) - 1)])) / 2
-        # Get the area of the hand enclosed between the 5 fingers and the wrist
-        # We will use the trapezoidal rule to approximate the area
-        hand_area = 0.0
-        for i in range(len(area_points) - 1):
-            hand_area += (area_points[i].x - area_points[i + 1].x) * (
-                    area_points[i].y + area_points[i + 1].y)
-        hand_area += (area_points[-1].x - area_points[0].x) * (area_points[-1].y + area_points[0].y)
-        hand_area = abs(hand_area) / 2
-
-        # Set the minimum and maximum values for the area from 0.0 to 1.0
-        hand_area = max(0.0, min(hand_area, 1.0))
-
-        # Apply EMA when hand is detected
-        if not first_run:
-            angle = alpha * angle + (1 - alpha) * prev_angle
-            x = alpha * x + (1 - alpha) * prev_x
-            y = alpha * y + (1 - alpha) * prev_y
-            z = alpha * z + (1 - alpha) * prev_z
-            dist = alpha * dist + (1 - alpha) * prev_dist
-            hand_area = alpha * hand_area + (1 - alpha) * prev_hand_area
+        # Apply EMA filtering
+        angle = _ema_v2.update('angle', angle)
+        x = _ema_v2.update('x', x)
+        y = _ema_v2.update('y', y)
+        z = _ema_v2.update('z', z)
+        dist = _ema_v2.update('dist', dist)
+        hand_area = _ema_v2.update('hand_area', hand_area)
     else:
-        # Apply EMA towards zero when no hand is detected
-        if not first_run:
-            angle = (1 - alpha) * prev_angle
-            x = (1 - alpha) * prev_x
-            y = (1 - alpha) * prev_y
-            z = (1 - alpha) * prev_z
-            dist = (1 - alpha) * prev_dist
-            hand_area = (1 - alpha) * prev_hand_area
-        else:
-            angle, x, y, z, dist, hand_area = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        # Decay to zero when no hand detected
+        angle = _ema_v2.update('angle', 0.0, decay_to_zero=True)
+        x = _ema_v2.update('x', 0.0, decay_to_zero=True)
+        y = _ema_v2.update('y', 0.0, decay_to_zero=True)
+        z = _ema_v2.update('z', 0.0, decay_to_zero=True)
+        dist = _ema_v2.update('dist', 0.0, decay_to_zero=True)
+        hand_area = _ema_v2.update('hand_area', 0.0, decay_to_zero=True)
 
-    # Update previous values
-    prev_angle, prev_x, prev_y, prev_z, prev_dist, prev_hand_area = angle, x, y, z, dist, hand_area
-    first_run = False
-
+    # Apply transformations to generator
     if hasattr(G.synthesis, 'input'):
         m = gen_utils.make_affine_transform(m=None, angle=angle, translate_x=x, translate_y=-y,
                                             scale_x=1/(1 + 3*hand_area), scale_y=1/(1 + 3*hand_area))
@@ -338,104 +469,58 @@ def process_v2(G, latent, mp_hands, image, label, const_input: torch.Tensor = No
         G.synthesis.b4.const.copy_(torch.from_numpy((1 - dist) * const_input + const_input_interpolation * dist))
 
     # Draw hand landmarks if requested
-    if show_landmarks and results.multi_hand_landmarks:
-        image.flags.writeable = True
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                image,
-                hand_landmarks,
-                mp.solutions.hands.HAND_CONNECTIONS)
-        # TODO: show the landmarks with some transparency and add the center (x, y).
+    if show_landmarks:
+        draw_hand_landmarks(image, results)
 
     generated_image = gen_utils.z_to_img(G, latent, label, truncation_psi=0.7, noise_mode='const')[0]
 
     return generated_image, image
 
-prev_thumb_dist, prev_index_dist, prev_middle_dist, prev_ring_dist, prev_pinky_dist, first_run = 0.0, 0.0, 0.0, 0.0, 0.0, True
+_ema_v3 = EMAFilter(alpha=0.15)
+
+
 def process_v3(G, latent, mp_hands, image, label, components: torch.Tensor, show_landmarks: bool = False):
     """
     Let each finger position/distance to the hand center dictate how much to move in the
-    Principal Component (PC) of the latent space of the Generator. TODO: make it work lol
+    Principal Component (PC) of the latent space of the Generator.
     """
-    global prev_thumb_dist, prev_index_dist, prev_middle_dist, prev_ring_dist, prev_pinky_dist, first_run
-
     image.flags.writeable = False
     results = mp_hands.process(image)
 
-    # EMA alpha value (adjust as needed)
-    alpha = 0.15
+    # Finger tip landmark indices
+    FINGERTIPS = {'thumb': 4, 'index': 8, 'middle': 12, 'ring': 16, 'pinky': 20}
 
-    thumb_dist, index_dist, middle_dist, ring_dist, pinky_dist = 0.0, 0.0, 0.0, 0.0, 0.0
-
+    finger_distances = {}
     if results.multi_hand_landmarks:
         hand = results.multi_hand_landmarks[0]
+        hand_center = get_hand_center(hand)
 
-        # Get the landmarks for each fingertip
-        thumb = hand.landmark[4]
-        index = hand.landmark[8]
-        middle = hand.landmark[12]
-        ring = hand.landmark[16]
-        pinky = hand.landmark[20]
-
-        # Get the center of the hand
-        x, y, z = np.mean([[lm.x, lm.y, lm.z] for lm in hand.landmark], axis=0)
-
-        # Get the distance from each fingertip to the center of the hand
-        thumb_dist = np.sqrt((thumb.x - x) ** 2 + (thumb.y - y) ** 2)
-        index_dist = np.sqrt((index.x - x) ** 2 + (index.y - y) ** 2)
-        middle_dist = np.sqrt((middle.x - x) ** 2 + (middle.y - y) ** 2)
-        ring_dist = np.sqrt((ring.x - x) ** 2 + (ring.y - y) ** 2)
-        pinky_dist = np.sqrt((pinky.x - x) ** 2 + (pinky.y - y) ** 2)
-
-    # Apply EMA
-    if not first_run:
-        thumb_dist = alpha * thumb_dist + (1 - alpha) * prev_thumb_dist
-        index_dist = alpha * index_dist + (1 - alpha) * prev_index_dist
-        middle_dist = alpha * middle_dist + (1 - alpha) * prev_middle_dist
-        ring_dist = alpha * ring_dist + (1 - alpha) * prev_ring_dist
-        pinky_dist = alpha * pinky_dist + (1 - alpha) * prev_pinky_dist
+        # Calculate distance from each fingertip to hand center
+        for finger_name, landmark_idx in FINGERTIPS.items():
+            fingertip = hand.landmark[landmark_idx]
+            dist = np.sqrt((fingertip.x - hand_center[0]) ** 2 + (fingertip.y - hand_center[1]) ** 2)
+            finger_distances[finger_name] = _ema_v3.update(finger_name, dist)
     else:
-        first_run = False
-
-    # Update previous values
-    prev_thumb_dist, prev_index_dist, prev_middle_dist, prev_ring_dist, prev_pinky_dist = thumb_dist, index_dist, middle_dist, ring_dist, pinky_dist
+        # Decay to zero when no hand detected
+        for finger_name in FINGERTIPS.keys():
+            finger_distances[finger_name] = _ema_v3.update(finger_name, 0.0, decay_to_zero=True)
 
     # Create a copy of the latent to manipulate
     latent_manipulated = latent.clone()
-
-    # Multiply the latent with the principal components matrix
     latent_pc = latent_manipulated @ components.float()
 
-    # Use this distance to see how much we move the latent space
-    # in the direction of the first 5 principal components
-    # scale_factor = 0.01  # Adjust this value as needed
-    # latent_manipulated = latent_manipulated + thumb_dist * scale_factor * latent_pc[0]
-    # latent_manipulated = latent_manipulated + index_dist * scale_factor * latent_pc[1]
-    # latent_manipulated = latent_manipulated + middle_dist * scale_factor * latent_pc[2]
-    # latent_manipulated = latent_manipulated + ring_dist * scale_factor * latent_pc[3]
-    # latent_manipulated = latent_manipulated + pinky_dist * scale_factor * latent_pc[4]
-
     # Use fingertip distances to move along principal components
-    scale_factor = 2.0  # Adjust this value as needed
+    scale_factor = 2.0
     pc_adjustments = torch.zeros_like(latent_pc)
-    pc_adjustments[0, 0] = thumb_dist * scale_factor
-    pc_adjustments[0, 1] = index_dist * scale_factor
-    pc_adjustments[0, 2] = middle_dist * scale_factor
-    pc_adjustments[0, 3] = ring_dist * scale_factor
-    pc_adjustments[0, 4] = pinky_dist * scale_factor
+    for i, finger_name in enumerate(FINGERTIPS.keys()):
+        pc_adjustments[0, i] = finger_distances[finger_name] * scale_factor
 
     # Apply the adjustments and project back to W space
     latent_manipulated = latent_manipulated + (pc_adjustments @ components.float().T)
 
     # Draw hand landmarks if requested
-    # TODO: create a util function for this, and add viz of center as in v2
-    if show_landmarks and results.multi_hand_landmarks:
-        image.flags.writeable = True
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                image,
-                hand_landmarks,
-                mp.solutions.hands.HAND_CONNECTIONS)
+    if show_landmarks:
+        draw_hand_landmarks(image, results)
 
     generated_image = gen_utils.w_to_img(G, latent_manipulated, truncation_psi=0.7)[0]
 
@@ -493,7 +578,7 @@ def process_v4(G, latent, mp_hands, image, label, circles, show_landmarks: bool 
     return img, image
 
 
-prev_v5_dist, prev_v5_angle, first_run_v5 = 0.0, 0.0, True
+_ema_v5 = EMAFilter(alpha=0.15)
 
 
 def process_v5(G, w_base, w_coarse, w_fine, mp_hands, image, label, truncation_psi: float = 0.7,
@@ -503,54 +588,24 @@ def process_v5(G, w_base, w_coarse, w_fine, mp_hands, image, label, truncation_p
     - Hand distance from center (0-1) controls mixing strength of coarse features (layers 0-3)
     - Hand orientation (angle) controls mixing strength of fine features (layers 8+)
     """
-    global prev_v5_dist, prev_v5_angle, first_run_v5
-
     image.flags.writeable = False
     results = mp_hands.process(image)
-
-    # EMA alpha value (adjust as needed)
-    alpha = 0.15
-
-    dist, angle = 0.0, 0.0
 
     if results.multi_hand_landmarks:
         hand = results.multi_hand_landmarks[0]
 
-        # Get hand orientation (angle)
-        base = hand.landmark[0]
-        middle = hand.landmark[9]
+        # Calculate hand features using helper functions
+        angle = get_hand_angle(hand)
+        hand_center = get_hand_center(hand)
+        dist = get_hand_distance_from_center(hand_center[:2])
 
-        dx = middle.x - base.x
-        dy = middle.y - base.y
-        angle = np.pi / 2 + np.arctan2(dy, dx)
-
-        # Get the center of the hand
-        x, y, z = np.mean([[lm.x, lm.y, lm.z] for lm in hand.landmark], axis=0)
-
-        # Center coordinates (0.5, 0.5 is center of screen)
-        x = x - 0.5
-        y = y - 0.5
-
-        # Distance from center (normalized to 0-1 range)
-        dist = np.sqrt(x ** 2 + y ** 2)
-        dist = dist * 4 * 2 ** 0.5  # Scale up to get a better range
-        dist = max(0.0, min(dist, 1.0))  # Clamp between 0.0 and 1.0
-
-        # Apply EMA when hand is detected
-        if not first_run_v5:
-            angle = alpha * angle + (1 - alpha) * prev_v5_angle
-            dist = alpha * dist + (1 - alpha) * prev_v5_dist
+        # Apply EMA filtering
+        angle = _ema_v5.update('angle', angle)
+        dist = _ema_v5.update('dist', dist)
     else:
-        # Apply EMA towards zero when no hand is detected
-        if not first_run_v5:
-            angle = (1 - alpha) * prev_v5_angle
-            dist = (1 - alpha) * prev_v5_dist
-        else:
-            angle, dist = 0.0, 0.0
-
-    # Update previous values
-    prev_v5_angle, prev_v5_dist = angle, dist
-    first_run_v5 = False
+        # Decay to zero when no hand detected
+        angle = _ema_v5.update('angle', 0.0, decay_to_zero=True)
+        dist = _ema_v5.update('dist', 0.0, decay_to_zero=True)
 
     # Create mixed latent
     w_mixed = w_base.clone()
@@ -564,23 +619,8 @@ def process_v5(G, w_base, w_coarse, w_fine, mp_hands, image, label, truncation_p
     w_mixed[:, 8:] = (1 - fine_mix_strength) * w_base[:, 8:] + fine_mix_strength * w_fine[:, 8:]
 
     # Draw hand landmarks if requested
-    if show_landmarks and results.multi_hand_landmarks:
-        image.flags.writeable = True
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                image,
-                hand_landmarks,
-                mp.solutions.hands.HAND_CONNECTIONS)
-        # Draw center point and distance indicator
-        center_x, center_y = int(image.shape[1] / 2), int(image.shape[0] / 2)
-        cv2.circle(image, (center_x, center_y), 5, (255, 0, 0), -1)  # Blue center point
-
-        # Draw hand center
-        if results.multi_hand_landmarks:
-            hand_center_x = int(np.mean([lm.x for lm in results.multi_hand_landmarks[0].landmark]) * image.shape[1])
-            hand_center_y = int(np.mean([lm.y for lm in results.multi_hand_landmarks[0].landmark]) * image.shape[0])
-            cv2.circle(image, (hand_center_x, hand_center_y), 5, (0, 255, 255), -1)  # Yellow hand center
-            cv2.line(image, (center_x, center_y), (hand_center_x, hand_center_y), (0, 255, 255), 2)  # Line from center to hand
+    if show_landmarks:
+        draw_hand_landmarks(image, results, show_center=True, show_distance_line=True)
 
     # Generate the image
     generated_image = gen_utils.w_to_img(G, w_mixed, truncation_psi=truncation_psi)[0]
