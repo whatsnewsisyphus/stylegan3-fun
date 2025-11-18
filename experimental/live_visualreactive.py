@@ -49,6 +49,38 @@ def parse_height(s: str = None) -> Union[int, Type[None]]:
     return None
 
 
+def parse_mix_layers(s: str, max_layers: int = 18) -> List[int]:
+    """
+    Parse mix layers argument for v6 mode.
+
+    Args:
+        s: Layer specification ('coarse', 'middle', 'fine', 'all', or range like '0-4')
+        max_layers: Maximum number of layers in the model
+
+    Returns:
+        List of layer indices to mix
+    """
+    layer_groups = {
+        'coarse': list(range(0, 4)),
+        'middle': list(range(4, 8)),
+        'fine': list(range(8, max_layers)),
+        'all': list(range(0, max_layers))
+    }
+
+    if s in layer_groups:
+        return layer_groups[s]
+    else:
+        # Parse as range (e.g., "0-4" or "2,5,7-9")
+        layers = []
+        for part in s.split(','):
+            if '-' in part:
+                start, end = part.split('-')
+                layers.extend(range(int(start), int(end) + 1))
+            else:
+                layers.append(int(part))
+        return [max(0, min(l, max_layers - 1)) for l in layers]
+
+
 def setup_generator(network_pkl: str, device: str, cfg: Optional[str], anchor_latent_space: bool):
     """Set up the generator."""
     if cfg:
@@ -628,13 +660,132 @@ def process_v5(G, w_base, w_coarse, w_fine, mp_hands, image, label, truncation_p
     return generated_image, image
 
 
+_ema_v6 = EMAFilter(alpha=0.15)
+
+
+def process_v6(G1, G2, latent, mp_hands, image, label, mix_layers: List[int],
+               truncation_psi: float = 0.7, show_landmarks: bool = False):
+    """
+    Model Forging: Mix two models in real-time using two hands.
+    - Two hands tracked independently
+    - Distance between hands controls mixing strength
+    - When hands close → models merge, when far → models separate
+    - Mix specified layers from both models
+    """
+    image.flags.writeable = False
+    results = mp_hands.process(image)
+
+    # Default mixing strength (no hands = use model 1)
+    mix_strength = 0.0
+    hand1_center = None
+    hand2_center = None
+
+    if results.multi_hand_landmarks:
+        num_hands = len(results.multi_hand_landmarks)
+
+        if num_hands >= 2:
+            # Track both hands
+            hand1 = results.multi_hand_landmarks[0]
+            hand2 = results.multi_hand_landmarks[1]
+
+            # Get hand centers
+            h1_center = get_hand_center(hand1)
+            h2_center = get_hand_center(hand2)
+
+            # Calculate distance between hands (normalized)
+            hand_distance = np.sqrt(
+                (h1_center[0] - h2_center[0]) ** 2 +
+                (h1_center[1] - h2_center[1]) ** 2
+            )
+
+            # Normalize distance to mixing strength
+            # Close hands (distance ~ 0) = high mixing (1.0)
+            # Far hands (distance ~ 1.4 diagonal) = low mixing (0.0)
+            max_distance = np.sqrt(2)  # Diagonal of unit square
+            mix_strength = 1.0 - min(hand_distance / max_distance, 1.0)
+
+            # Apply EMA filtering for smooth transitions
+            mix_strength = _ema_v6.update('mix_strength', mix_strength)
+
+            hand1_center = h1_center
+            hand2_center = h2_center
+
+        elif num_hands == 1:
+            # Only one hand: decay to zero mixing
+            mix_strength = _ema_v6.update('mix_strength', 0.0, decay_to_zero=True)
+            hand1_center = get_hand_center(results.multi_hand_landmarks[0])
+    else:
+        # No hands: decay to zero mixing
+        mix_strength = _ema_v6.update('mix_strength', 0.0, decay_to_zero=True)
+
+    # Generate w latents from both models
+    w1 = G1.mapping(latent, label, truncation_psi=truncation_psi)
+    w2 = G2.mapping(latent, label, truncation_psi=truncation_psi)
+
+    # Mix the specified layers
+    w_mixed = w1.clone()
+    for layer_idx in mix_layers:
+        if layer_idx < w1.shape[1]:
+            w_mixed[:, layer_idx] = (1 - mix_strength) * w1[:, layer_idx] + mix_strength * w2[:, layer_idx]
+
+    # Generate image using the base model's synthesis network with mixed latent
+    img = G1.synthesis(w_mixed, noise_mode='const')
+    img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+    generated_image = img[0].cpu().numpy()
+
+    # Draw visualization
+    if show_landmarks:
+        image.flags.writeable = True
+
+        # Draw hand landmarks
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp.solutions.drawing_utils.draw_landmarks(
+                image,
+                hand_landmarks,
+                mp.solutions.hands.HAND_CONNECTIONS)
+
+        # If two hands, draw connection line and mixing visualization
+        if hand1_center is not None and hand2_center is not None:
+            h1_x = int(hand1_center[0] * image.shape[1])
+            h1_y = int(hand1_center[1] * image.shape[0])
+            h2_x = int(hand2_center[0] * image.shape[1])
+            h2_y = int(hand2_center[1] * image.shape[0])
+
+            # Draw centers
+            cv2.circle(image, (h1_x, h1_y), 8, (255, 0, 0), -1)  # Blue for model 1
+            cv2.circle(image, (h2_x, h2_y), 8, (0, 0, 255), -1)  # Red for model 2
+
+            # Draw connection line with thickness based on mixing strength
+            thickness = max(1, int(mix_strength * 10))
+            # Color gradient: blue to purple to red based on mix_strength
+            b = int(255 * (1 - mix_strength))
+            r = int(255 * mix_strength)
+            cv2.line(image, (h1_x, h1_y), (h2_x, h2_y), (b, 0, r), thickness)
+
+            # Draw mixing percentage text
+            mix_percentage = int(mix_strength * 100)
+            text = f"Mix: {mix_percentage}%"
+            text_x = (h1_x + h2_x) // 2
+            text_y = (h1_y + h2_y) // 2 - 20
+            cv2.putText(image, text, (text_x, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        elif hand1_center is not None:
+            # Draw single hand center
+            h1_x = int(hand1_center[0] * image.shape[1])
+            h1_y = int(hand1_center[1] * image.shape[0])
+            cv2.circle(image, (h1_x, h1_y), 8, (255, 0, 0), -1)
+
+    return generated_image, image
+
+
 # ----------------------------------------------------------------------------
 
 
 # Main loop function
 def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device, layer, static_w,
               label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror,
-              w_base=None, w_coarse=None, w_fine=None, truncation_psi=0.7):
+              w_base=None, w_coarse=None, w_fine=None, truncation_psi=0.7, G2=None, mix_layer_indices=None):
 
     if mode == 'v3':
         # Get the principal components, if we use mode 'v3'
@@ -702,6 +853,9 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
             simg, img = process_v4(G, all_latents[c % len(all_latents)], mp_hands, img, label, circles, show_landmarks)
         elif mode == 'v5':
             simg, img = process_v5(G, w_base, w_coarse, w_fine, mp_hands, img, label, truncation_psi, show_landmarks)
+        elif mode == 'v6':
+            latent = all_latents[c % len(all_latents)]
+            simg, img = process_v6(G, G2, latent, mp_hands, img, label, mix_layer_indices, truncation_psi, show_landmarks)
         else:
             raise ValueError(f"Mode {mode} not recognized.")
 
@@ -762,8 +916,10 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 @click.command()
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename: can be URL, local file, or the name of the model in torch_utils.gen_utils.resume_specs', required=True)
+@click.option('--network2', 'network_pkl2', help='Second network for model mixing (v6 mode only)', default=None)
 @click.option('--device', help='Device to use for image generation; using the CPU is slower than the GPU', type=click.Choice(['cpu', 'cuda']), default='cuda', show_default=True)
 @click.option('--cfg', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of the network, used only if you want to use the pretrained models in torch_utils.gen_utils.resume_specs')
+@click.option('--cfg2', type=click.Choice(['stylegan2', 'stylegan3-t', 'stylegan3-r']), help='Config of second network (v6 mode only)', default=None)
 # Synthesis options (feed a list of seeds or give the projected w to synthesize)
 @click.option('--seed', type=click.INT, help='Random seed to use for static synthesized image', default=0, show_default=True)
 @click.option('--coarse-seed', type=click.INT, help='Random seed for coarse features source (v5 mode only)', default=1, show_default=True)
@@ -781,7 +937,8 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 @click.option('--face', 'face_tracking', type=bool, help='Use face tracking', default=False, show_default=True)
 @click.option('--body', 'body_tracking', type=bool, help='Use body tracking', default=False, show_default=True)
 # How to set the fake dlatent
-@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5']), required=True)
+@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6']), required=True)
+@click.option('--mix-layers', type=str, help='Layers to mix for v6 mode (e.g., "coarse", "middle", "fine", "all", "0-4")', default='all', show_default=True)
 # TODO: intermediate layers?
 # Video options
 @click.option('--display-height', type=parse_height, help="Height of the display window; if 'max', will use G.img_resolution", default=None, show_default=True)
@@ -797,8 +954,10 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 def live_visual_reactive(
         ctx,
         network_pkl: str,
+        network_pkl2: Optional[str],
         device: Optional[str],
         cfg: str,
+        cfg2: Optional[str],
         seed: int,
         coarse_seed: int,
         fine_seed: int,
@@ -814,6 +973,7 @@ def live_visual_reactive(
         face_tracking: bool,
         body_tracking: bool,
         mode: str,
+        mix_layers: str,
         display_height: Optional[int],
         anchor_latent_space: bool,
         fps: int,
@@ -826,6 +986,18 @@ def live_visual_reactive(
 
     G = setup_generator(network_pkl, device, cfg, anchor_latent_space)
 
+    # Load second generator for v6 mode
+    if mode == 'v6':
+        if network_pkl2 is None:
+            raise ValueError("v6 mode requires --network2 parameter")
+        print('Loading second generator for model mixing...')
+        G2 = setup_generator(network_pkl2, device, cfg2 if cfg2 else cfg, anchor_latent_space)
+        # Check compatibility
+        if G.img_resolution != G2.img_resolution:
+            raise ValueError(f"Models must have same resolution. G1: {G.img_resolution}, G2: {G2.img_resolution}")
+    else:
+        G2 = None
+
     # Label, in case it's a class-conditional model
     class_idx = gen_utils.parse_class(G, class_idx, ctx)
     label = torch.zeros([1, G.c_dim], device=device)
@@ -837,7 +1009,7 @@ def live_visual_reactive(
 
     vgg16_features = setup_vgg16(device) if mode in ['v0', 'v1'] else None
     cam, height, width = setup_camera(demo_height, demo_width)
-    mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4', 'v5'] else (None, None, None)
+    mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4', 'v5', 'v6'] else (None, None, None)
 
     display_height = G.img_resolution if display_height is None or display_height == 'max' else display_height
 
@@ -852,6 +1024,22 @@ def live_visual_reactive(
         w_base = None
         w_coarse = None
         w_fine = None
+
+    # Setup for v6 mode (model mixing)
+    if mode == 'v6':
+        # Parse which layers to mix
+        mix_layer_indices = parse_mix_layers(mix_layers, max_layers=G.mapping.num_ws)
+        print(f'Mixing layers: {mix_layer_indices}')
+
+        # Create noise loop for continuous variation
+        num_frames = 900
+        shape = [num_frames, 1, G.z_dim]
+        all_latents = np.random.RandomState(seed).randn(*shape).astype(np.float32)
+        all_latents = scipy.ndimage.gaussian_filter(all_latents, sigma=[3.0 * 30, 0, 0], mode='wrap')
+        all_latents /= np.sqrt(np.mean(np.square(all_latents)))
+        all_latents = torch.from_numpy(all_latents).to(device)
+    else:
+        mix_layer_indices = None
 
     if mode in ['v2', 'v4']:
         num_frames = 900
@@ -880,7 +1068,7 @@ def live_visual_reactive(
 
     main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device,
               layer, static_w, label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror,
-              w_base, w_coarse, w_fine, truncation_psi)
+              w_base, w_coarse, w_fine, truncation_psi, G2, mix_layer_indices)
 
 
 # ----------------------------------------------------------------------------
