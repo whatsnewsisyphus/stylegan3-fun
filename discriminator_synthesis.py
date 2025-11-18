@@ -23,6 +23,7 @@ import re
 
 from torch_utils import gen_utils
 from network_features import DiscriminatorFeatures
+from fractalperlin import get_2d_perlin, get_3d_perlin
 
 
 # ----------------------------------------------------------------------------
@@ -59,11 +60,24 @@ def get_image(seed: int = 0,
               image_size: int = 1024,
               convert_to_grayscale: bool = False,
               device: torch.device = torch.device('cpu')) -> Tuple[PIL.Image.Image, str]:
-    """Set the random seed (NumPy + PyTorch), as well as get an image from a path or generate a random one with the seed"""
+    """
+    Get or generate an image for DeepDream synthesis.
+
+    Args:
+        seed: Random seed for reproducibility
+        image_noise: Type of noise ('random' or 'perlin')
+        starting_image: Path to existing image (if None, generates new)
+        image_size: Size of generated image
+        convert_to_grayscale: Convert to grayscale
+        device: Device for noise generation
+
+    Returns:
+        (PIL Image, filename string)
+    """
     torch.manual_seed(seed)
     rnd = np.random.RandomState(seed)
 
-    # Load image or generate a random one if none is provided
+    # Load existing image if provided
     if starting_image is not None:
         image = Image.open(starting_image).convert('RGB').resize((image_size, image_size), Image.LANCZOS)
     else:
@@ -71,32 +85,51 @@ def get_image(seed: int = 0,
             starting_image = f'random_image-seed_{seed:08d}.jpg'
             image = Image.fromarray(rnd.randint(0, 255, (image_size, image_size, 3), dtype='uint8'))
         elif image_noise == 'perlin':
-            try:
-                # Graciously using Mathieu Duchesneau's implementation: https://github.com/duchesneaumathieu/pyperlin
-                from pyperlin import FractalPerlin2D
-                starting_image = f'perlin_image-seed_{seed:08d}.jpg'
-                shape = (3, image_size, image_size)
-                resolutions = [(2**i, 2**i) for i in range(1, 6+1)]  # for lacunarity = 2.0  # TODO: set as cli variable
-                factors = [0.5**i for i in range(6)]  # for persistence = 0.5 TODO: set as cli variables
-                g_cuda = torch.Generator(device=device).manual_seed(seed)
-                rgb = FractalPerlin2D(shape, resolutions, factors, generator=g_cuda)().cpu().numpy()
-                rgb = (255 * (rgb + 1) / 2).astype(np.uint8)  # [-1.0, 1.0] => [0, 255]
-                image = Image.fromarray(rgb.transpose(1, 2, 0), 'RGB')  # Reshape leads us to weird tiling
-
-            except ImportError:
-                raise ImportError('pyperlin not found! Install it via "pip install pyperlin"')
+            starting_image = f'perlin_image-seed_{seed:08d}.jpg'
+            # Use our local fractalperlin implementation
+            shape = (3, image_size, image_size)
+            noise = get_2d_perlin(shape, seed=seed, device=device, octaves=6)
+            rgb = (255 * (noise[0].cpu().numpy() + 1) / 2).astype(np.uint8)  # [-1, 1] → [0, 255]
+            image = Image.fromarray(rgb.transpose(1, 2, 0), 'RGB')
 
     if convert_to_grayscale:
-        image = image.convert('L').convert('RGB')  # We do a little trolling to Pillow (so we have a 3-channel image)
+        image = image.convert('L').convert('RGB')
 
     return image, starting_image
 
 
-def get_3d_perlin_noise(seed: int,
-                        image_size: int,
-                        convert_to_grayscale: bool,
-                        device: torch.device) -> Tuple[np.ndarray, str]:
-    pass
+def get_perlin_video(seed: int,
+                     num_frames: int,
+                     image_size: int,
+                     convert_to_grayscale: bool = False,
+                     device: torch.device = torch.device('cuda'),
+                     loop: bool = True) -> Tuple[torch.Tensor, str]:
+    """
+    Generate a video sequence using 3D fractal Perlin noise.
+
+    Args:
+        seed: Random seed
+        num_frames: Number of frames to generate
+        image_size: Size of each frame
+        convert_to_grayscale: Convert to grayscale
+        device: Device for generation
+        loop: If True, video loops seamlessly
+
+    Returns:
+        (Tensor of shape [num_frames, 3, H, W], filename prefix)
+    """
+    shape = (1 if convert_to_grayscale else 3, image_size, image_size)
+    noise = get_3d_perlin(shape, num_frames, seed=seed, device=device, octaves=6, loop=loop)
+
+    # Convert from [-1, 1] to [0, 255]
+    frames = ((noise + 1) / 2 * 255).clamp(0, 255).byte()
+
+    # If grayscale, replicate to 3 channels
+    if convert_to_grayscale:
+        frames = frames.expand(-1, 3, -1, -1)
+
+    filename_prefix = f'perlin3d_video-seed_{seed:08d}-frames_{num_frames}'
+    return frames, filename_prefix
 
 
 def crop_resize_rotate(img: PIL.Image.Image,
@@ -1003,6 +1036,155 @@ def random_interpolation(
     stream = ffmpeg.input(os.path.join(run_dir, f'{image_noise}-interpolation_frame_%0{n_digits}d.jpg'), framerate=fps)
     stream = ffmpeg.output(stream, os.path.join(run_dir, f'{image_noise}-interpolation.mp4'), crf=20, pix_fmt='yuv420p')
     ffmpeg.run(stream, capture_stdout=True, capture_stderr=True, cmd=ffmpeg_command)
+
+# ----------------------------------------------------------------------------
+
+
+@main.command(name='dream-video', help='Generate a DeepDream video using 3D fractal Perlin noise for temporal coherence')
+@click.pass_context
+@click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
+@click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
+# Synthesis options
+@click.option('--seed', type=int, help='Random seed to use', default=0, show_default=True)
+@click.option('--convert-to-grayscale', '-grayscale', is_flag=True, help='Add flag to grayscale the video')
+@click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)', default=None)
+@click.option('--lr', 'learning_rate', type=float, help='Learning rate', default=5e-3, show_default=True)
+@click.option('--iterations', '-it', type=click.IntRange(min=1), help='Number of gradient ascent steps per octave', default=10, show_default=True)
+# Layer options
+@click.option('--layers', type=str, help='Comma-separated list of discriminator layers to use', default='b16_conv0', show_default=True)
+@click.option('--channels', type=gen_utils.num_range, help='Channel indices to use (None = all)', default=None, show_default=True)
+@click.option('--normed', 'norm_model_layers', is_flag=True, help='Divide features by number of elements')
+@click.option('--sqrt-normed', 'sqrt_norm_model_layers', is_flag=True, help='Divide features by sqrt of number of elements')
+# Octaves options
+@click.option('--num-octaves', type=click.IntRange(min=1), help='Number of octaves', default=5, show_default=True)
+@click.option('--octave-scale', type=float, help='Image scale between octaves', default=1.4, show_default=True)
+@click.option('--unzoom-octave', type=bool, help='Unzoom octaves (slower but works with fixed-size Discriminator)', default=False, show_default=True)
+# Video options
+@click.option('--num-frames', type=click.IntRange(min=1), help='Number of frames to generate', default=100, show_default=True)
+@click.option('--loop', is_flag=True, help='Make video loop seamlessly')
+@click.option('--fps', type=gen_utils.parse_fps, help='FPS for the output video', default=25, show_default=True)
+# Extra parameters
+@click.option('--outdir', type=click.Path(file_okay=False), help='Output directory', default=os.path.join(os.getcwd(), 'out', 'discriminator_synthesis'), show_default=True, metavar='DIR')
+@click.option('--description', '-desc', type=str, help='Additional description for output directory', default='', show_default=True)
+def discriminator_dream_video(
+        ctx: click.Context,
+        network_pkl: Union[str, os.PathLike],
+        cfg: Optional[str],
+        seed: int,
+        convert_to_grayscale: bool,
+        class_idx: Optional[int],
+        learning_rate: float,
+        iterations: int,
+        layers: str,
+        channels: Optional[List[int]],
+        norm_model_layers: bool,
+        sqrt_norm_model_layers: bool,
+        num_octaves: int,
+        octave_scale: float,
+        unzoom_octave: bool,
+        num_frames: int,
+        loop: bool,
+        fps: int,
+        outdir: Union[str, os.PathLike],
+        description: str,
+):
+    """
+    Generate a DeepDream video using 3D fractal Perlin noise.
+
+    Each frame is a slice of 3D noise, providing temporal coherence.
+    Frames are optimized using discriminator features like standard DeepDream.
+    """
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    # Load Discriminator
+    D = gen_utils.load_network('D', network_pkl, cfg, device)
+    model_resolution = D.img_resolution
+    model = DiscriminatorFeatures(D).requires_grad_(False).to(device)
+
+    # Parse layers
+    layers = layers.split(',')
+    if 'use_all' in layers:
+        layers = get_available_layers(max_resolution=model_resolution)
+    else:
+        available_layers = get_available_layers(max_resolution=model_resolution)
+        layers = [layer for layer in layers if layer in available_layers]
+
+    # Make output directory
+    desc = f'discriminator-dream-video-{num_frames}frames'
+    desc = f'{desc}-{description}' if description else desc
+    run_dir = gen_utils.make_run_dir(outdir, desc)
+
+    print(f'Generating {num_frames} frames of 3D Perlin noise...')
+    noise_frames, _ = get_perlin_video(seed, num_frames, model_resolution, convert_to_grayscale, device, loop)
+
+    # Number of digits for frame numbering
+    n_digits = int(np.log10(num_frames)) + 1
+
+    print(f'Applying DeepDream to each frame...')
+    for frame_idx in tqdm(range(num_frames), desc='Dreaming', unit='frame'):
+        # Get frame as PIL Image
+        frame_np = noise_frames[frame_idx].cpu().numpy().transpose(1, 2, 0)
+        frame_pil = Image.fromarray(frame_np)
+
+        # Apply DeepDream to this frame
+        dreamed_frame = deep_dream(
+            frame_pil, model, model_resolution,
+            layers=layers, channels=channels, seed=None,
+            normed=norm_model_layers, sqrt_normed=sqrt_norm_model_layers,
+            iterations=iterations, lr=learning_rate,
+            octave_scale=octave_scale, num_octaves=num_octaves,
+            unzoom_octave=unzoom_octave,
+            disable_inner_tqdm=True,
+            ignore_initial_transform=True
+        )
+
+        # Save frame
+        filename = f'frame_{frame_idx:0{n_digits}d}.jpg'
+        Image.fromarray(dreamed_frame, 'RGB').save(os.path.join(run_dir, filename))
+
+    # Save configuration
+    ctx.obj = {
+        'network_pkl': network_pkl,
+        'synthesis_options': {
+            'seed': seed,
+            'convert_to_grayscale': convert_to_grayscale,
+            'class_idx': class_idx,
+            'learning_rate': learning_rate,
+            'iterations': iterations
+        },
+        'layer_options': {
+            'layers': layers,
+            'channels': channels,
+            'norm_model_layers': norm_model_layers,
+            'sqrt_norm_model_layers': sqrt_norm_model_layers
+        },
+        'octaves_options': {
+            'num_octaves': num_octaves,
+            'octave_scale': octave_scale,
+            'unzoom_octave': unzoom_octave
+        },
+        'video_options': {
+            'num_frames': num_frames,
+            'loop': loop,
+            'fps': fps
+        },
+        'extra_parameters': {
+            'outdir': run_dir,
+            'description': description
+        }
+    }
+    gen_utils.save_config(ctx=ctx, run_dir=run_dir)
+
+    # Generate video
+    print('Saving video...')
+    gen_utils.save_video_from_images(
+        run_dir=run_dir,
+        image_names=f'frame_%0{n_digits}d.jpg',
+        video_name='dream-video',
+        fps=fps,
+        reverse_video=False
+    )
+
 
 # ----------------------------------------------------------------------------
 
