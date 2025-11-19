@@ -302,46 +302,160 @@ class StyleLoss(nn.Module):
 
 
 @main.command(name='dream-transfer', help='Use the StyleGAN2/3 Discriminator to perform style transfer')
+@click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--cfg', type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), help='Model base configuration', default=None)
 @click.option('--content', type=str, help='Content image filename (url or local path)', required=True)
 @click.option('--style', type=str, help='Style image filename (url or local path)', required=True)
+@click.option('--content-layers', type=str, help='Comma-separated discriminator layers for content', default='b16_conv1', show_default=True)
+@click.option('--style-layers', type=str, help='Comma-separated discriminator layers for style', default='b64_conv0,b32_conv0,b16_conv0,b8_conv0', show_default=True)
+@click.option('--content-weight', type=float, help='Weight for content loss', default=1.0, show_default=True)
+@click.option('--style-weight', type=float, help='Weight for style loss', default=1e6, show_default=True)
+@click.option('--iterations', type=int, help='Number of optimization steps', default=300, show_default=True)
+@click.option('--lr', type=float, help='Learning rate', default=1e-1, show_default=True)
+@click.option('--outdir', type=click.Path(file_okay=False), help='Output directory', default=os.path.join(os.getcwd(), 'out', 'discriminator_synthesis'), show_default=True)
+@click.option('--description', '-desc', type=str, help='Additional description for output directory', default='', show_default=True)
 def style_transfer_discriminator(
         ctx: click.Context,
         network_pkl: str,
         cfg: str,
         content: str,
         style: str,
+        content_layers: str,
+        style_layers: str,
+        content_weight: float,
+        style_weight: float,
+        iterations: int,
+        lr: float,
+        outdir: str,
+        description: str,
 ):
-    print('Coming soon!')
-    # Reference: https://pytorch.org/tutorials/advanced/neural_style_tutorial.html
+    """
+    Perform neural style transfer using discriminator features.
 
-    # Set up device
+    Optimizes an image to match the content of one image and the style of another,
+    using features extracted from a StyleGAN2/3 discriminator instead of VGG.
+
+    Reference: https://pytorch.org/tutorials/advanced/neural_style_tutorial.html
+    """
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    imsize = 512 if torch.cuda.is_available() else 128  # use small size if no gpu
-
-    loader = transforms.Compose([transforms.Resize(imsize),  # scale imported image
-                                transforms.ToTensor()])  # transform it into a torch tensor
-
-    # Helper function
-    def image_loader(image_name):
-        image = Image.open(image_name)
-        # fake batch dimension required to fit network's input dimensions
-        image = loader(image).unsqueeze(0)
-        return image.to(device, torch.float)
-
-    style_img = image_loader(style)
-    content_img = image_loader(content)
-
-    # This shouldn't really happen, but just in case
-    assert style_img.size() == content_img.size(), 'Style and content images must be the same size'
-
-    unloader = transforms.ToPILImage()  # reconvert into PIL image
-
-    # Load Discriminator
+    # Load discriminator
     D = gen_utils.load_network('D', network_pkl, cfg, device)
-    # TODO: finish this!
+    model_resolution = D.img_resolution
+    model = DiscriminatorFeatures(D).requires_grad_(False).to(device)
+
+    # Parse layers
+    content_layers = content_layers.split(',')
+    style_layers = style_layers.split(',')
+
+    # Validate layers
+    available_layers = get_available_layers(max_resolution=model_resolution)
+    content_layers = [l for l in content_layers if l in available_layers]
+    style_layers = [l for l in style_layers if l in available_layers]
+
+    # Load and preprocess images
+    def load_image(image_path):
+        img = Image.open(image_path).convert('RGB')
+        img = img.resize((model_resolution, model_resolution), Image.LANCZOS)
+        img = preprocess(img).unsqueeze(0)
+        return img.to(device)
+
+    content_img = load_image(content)
+    style_img = load_image(style)
+
+    # Start from content image (or could use noise)
+    input_img = content_img.clone()
+    input_img.requires_grad_(True)
+
+    # Extract target features
+    with torch.no_grad():
+        content_features = model.get_layers_features(content_img, layers=content_layers)
+        style_features = model.get_layers_features(style_img, layers=style_layers)
+
+    # Create loss modules
+    content_losses = [ContentLoss(feat) for feat in content_features]
+    style_losses = [StyleLoss(feat) for feat in style_features]
+
+    # Optimizer
+    optimizer = torch.optim.LBFGS([input_img], lr=lr, max_iter=20)
+
+    # Make output directory
+    desc = 'discriminator-style-transfer'
+    desc = f'{desc}-{description}' if description else desc
+    run_dir = gen_utils.make_run_dir(outdir, desc)
+
+    # Save original images
+    content_pil = Image.open(content).convert('RGB').resize((model_resolution, model_resolution), Image.LANCZOS)
+    style_pil = Image.open(style).convert('RGB').resize((model_resolution, model_resolution), Image.LANCZOS)
+    content_pil.save(os.path.join(run_dir, 'content.jpg'))
+    style_pil.save(os.path.join(run_dir, 'style.jpg'))
+
+    print(f'Running style transfer for {iterations} iterations...')
+    print(f'Content layers: {content_layers}')
+    print(f'Style layers: {style_layers}')
+
+    iteration = [0]
+
+    def closure():
+        # Clamp input image
+        input_img.data = clip(input_img.data)
+
+        optimizer.zero_grad()
+
+        # Get features from current image
+        current_features_content = model.get_layers_features(input_img, layers=content_layers)
+        current_features_style = model.get_layers_features(input_img, layers=style_layers)
+
+        # Compute losses
+        content_loss = 0
+        for i, loss_module in enumerate(content_losses):
+            content_loss += F.mse_loss(current_features_content[i], loss_module.target)
+
+        style_loss = 0
+        for i, loss_module in enumerate(style_losses):
+            G_current = gram_matrix(current_features_style[i])
+            style_loss += F.mse_loss(G_current, loss_module.target)
+
+        # Weighted combination
+        total_loss = content_weight * content_loss + style_weight * style_loss
+        total_loss.backward()
+
+        iteration[0] += 1
+        if iteration[0] % 50 == 0:
+            print(f'Iteration {iteration[0]}/{iterations} | Content Loss: {content_loss.item():.4f} | Style Loss: {style_loss.item():.4f}')
+
+        return total_loss
+
+    # Optimization loop
+    for _ in tqdm(range(iterations // 20), desc='Style transfer'):
+        optimizer.step(closure)
+
+    # Final image
+    input_img.data = clip(input_img.data)
+    output = deprocess(input_img.cpu().data.numpy())
+
+    # Save result
+    Image.fromarray(output, 'RGB').save(os.path.join(run_dir, 'stylized.jpg'))
+
+    # Save configuration
+    ctx.obj = {
+        'network_pkl': network_pkl,
+        'content_image': content,
+        'style_image': style,
+        'content_layers': content_layers,
+        'style_layers': style_layers,
+        'content_weight': content_weight,
+        'style_weight': style_weight,
+        'iterations': iterations,
+        'lr': lr,
+        'outdir': run_dir,
+        'description': description
+    }
+    gen_utils.save_config(ctx=ctx, run_dir=run_dir)
+
+    print(f'Style transfer complete! Results saved to {run_dir}')
+
 
 
 # ----------------------------------------------------------------------------
