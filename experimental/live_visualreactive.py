@@ -639,7 +639,9 @@ def process_v4(G, latent, mp_hands, image, label, circles, show_landmarks: bool 
     img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
     img = img[0].cpu().numpy()
 
-    # TODO: same as v2 and v3, add hand landmarks
+    # Draw hand landmarks if requested
+    if show_landmarks:
+        draw_hand_landmarks(image, results)
 
     return img, image
 
