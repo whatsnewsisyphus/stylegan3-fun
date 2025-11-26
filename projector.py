@@ -522,19 +522,13 @@ def run_projection(
             synth_image = gen_utils.w_to_img(G, dlatents=w, noise_mode='const')[0]
             PIL.Image.fromarray(synth_image, 'RGB').save(f'{result_name}_step{step:0{n_digits}d}.png')
             np.save(f'{npy_name}_step{step:0{n_digits}d}.npy', w.unsqueeze(0).cpu().numpy())
-        # Save the final projected frame and W vector.
-        print('Saving final projection results...')
-        projected_w = projected_w_steps[-1]
-        synth_image = gen_utils.w_to_img(G, dlatents=projected_w, noise_mode='const')[0]
-        PIL.Image.fromarray(synth_image, 'RGB').save(f'{result_name}_{num_steps}_final.png')
-        np.save(f'{npy_name}_{num_steps}_final.npy', projected_w.unsqueeze(0).cpu().numpy())
-    else:
-        # Save only the final projected frame and W vector.
-        print('Saving projection results...')
-        projected_w = projected_w_steps[-1]
-        synth_image = gen_utils.w_to_img(G, dlatents=projected_w, noise_mode='const')[0]
-        PIL.Image.fromarray(synth_image, 'RGB').save(f'{result_name}_{num_steps}_final.png')
-        np.save(f'{npy_name}_{num_steps}_final.npy', projected_w.unsqueeze(0).cpu().numpy())
+    
+    # Save the final projected frame and W vector.
+    print('Saving projection results...')
+    projected_w = projected_w_steps[-1]
+    synth_image = gen_utils.w_to_img(G, dlatents=projected_w, noise_mode='const')[0]
+    PIL.Image.fromarray(synth_image, 'RGB').save(f'{result_name}_final.png')
+    np.save(f'{npy_name}_final.npy', projected_w.unsqueeze(0).cpu().numpy())
 
     # Save the optimization video and compress it if so desired
     if save_video:
