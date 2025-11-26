@@ -16,10 +16,17 @@ except ImportError as e:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from torch_utils import gen_utils
+# Import discriminator features for v8 mode
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 import numpy as np
 
 import cv2
+import PIL
+from PIL import Image
 
 import random
 import scipy
@@ -28,6 +35,7 @@ from sklearn.decomposition import PCA
 
 import torch
 from torchvision import transforms
+from torch.autograd import Variable
 
 import legacy
 
@@ -121,6 +129,17 @@ def setup_mediapipe():
     mp_drawing = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
     return mp_hands, mp_drawing, mp_drawing_styles
+
+
+def setup_selfie_segmentation():
+    """Set up MediaPipe for selfie segmentation (multi-class body parts)."""
+    try:
+        # MediaPipe SelfieSegmentation with multiclass model
+        mp_selfie = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        return mp_selfie
+    except Exception as e:
+        print(f'Warning: Could not initialize selfie segmentation: {e}')
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -1024,13 +1043,149 @@ def process_v7(G, G2, base_latent, mp_hands, image, label, truncation_psi: float
     return generated_image, image
 
 
+# Preprocessing for discriminator (v8 mode)
+mean_disc = np.array([0.485, 0.456, 0.406])
+std_disc = np.array([0.229, 0.224, 0.225])
+preprocess_disc = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean_disc, std_disc)])
+
+
+def deprocess_disc(image_np: torch.Tensor) -> np.ndarray:
+    """Deprocess discriminator output."""
+    image_np = image_np.squeeze().transpose(1, 2, 0)
+    image_np = image_np * std_disc.reshape((1, 1, 3)) + mean_disc.reshape((1, 1, 3))
+    image_np = np.clip(image_np, 0.0, 1.0)
+    image_np = (255 * image_np).astype('uint8')
+    return image_np
+
+
+def clip_disc(image_tensor: torch.Tensor) -> torch.Tensor:
+    """Clamp per channel for discriminator."""
+    for c in range(3):
+        m, s = mean_disc[c], std_disc[c]
+        image_tensor[0, c] = torch.clamp(image_tensor[0, c], -m / s, (1 - m) / s)
+    return image_tensor
+
+
+def process_v8(D_model, mp_selfie, image, body_parts: List[int],
+               iterations: int = 5, lr: float = 1e-2,
+               layers: List[str] = None, show_mask: bool = False):
+    """
+    🎭 Body Dream Mask - Real-time discriminator dreaming on segmented body parts.
+
+    Uses MediaPipe selfie segmentation to mask specific body parts, then applies
+    discriminator-based DeepDream to those regions in real-time.
+
+    Args:
+        D_model: Discriminator feature extractor
+        mp_selfie: MediaPipe selfie segmentation model
+        image: Camera frame (BGR)
+        body_parts: List of segmentation class IDs to dream on
+            0 - background, 1 - hair, 2 - body-skin, 3 - face-skin, 4 - clothes, 5 - others
+        iterations: Number of gradient ascent steps (low for real-time)
+        lr: Learning rate
+        layers: Discriminator layers to use
+        show_mask: Show segmentation mask visualization
+
+    Returns:
+        (dreamed_image, visualization_image)
+    """
+    if mp_selfie is None:
+        # Fallback: return original image if segmentation not available
+        return image, image
+
+    # Default layers if not specified
+    if layers is None:
+        layers = ['b16_conv0']
+
+    # Get segmentation
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = mp_selfie.process(image_rgb)
+
+    if results.segmentation_mask is None:
+        return image, image
+
+    # Get segmentation mask (256x256)
+    seg_mask = results.segmentation_mask
+
+    # Create binary mask for selected body parts
+    # Note: MediaPipe's multiclass segmentation returns class IDs directly
+    mask = np.zeros_like(seg_mask, dtype=np.uint8)
+    for part_id in body_parts:
+        mask[seg_mask == part_id] = 1
+
+    # Upscale mask to match image resolution
+    mask_upscaled = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+    mask_upscaled = mask_upscaled[:, :, np.newaxis]  # Add channel dimension
+
+    # Convert image to PIL for preprocessing
+    pil_image = Image.fromarray(image_rgb)
+
+    # Preprocess for discriminator
+    preprocessed = preprocess_disc(pil_image).unsqueeze(0).to(D_model.device)
+    preprocessed = Variable(preprocessed, requires_grad=True)
+
+    # Perform gradient ascent (lightweight version of DeepDream)
+    for i in range(iterations):
+        D_model.zero_grad()
+
+        # Extract features
+        features = D_model.get_layers_features(preprocessed, layers=layers)
+
+        # Maximize activation (simple dream loss)
+        loss = sum(layer.norm() for layer in features)
+        loss.backward()
+
+        # Gradient ascent
+        avg_grad = np.abs(preprocessed.grad.data.cpu().numpy()).mean()
+        norm_lr = lr / (avg_grad + 1e-7)
+        preprocessed.data += norm_lr * preprocessed.grad.data
+        preprocessed.data = clip_disc(preprocessed.data)
+        preprocessed.grad.data.zero_()
+
+    # Deprocess
+    dreamed_np = deprocess_disc(preprocessed.cpu().data.numpy())
+    dreamed_bgr = cv2.cvtColor(dreamed_np, cv2.COLOR_RGB2BGR)
+
+    # Composite: blend dreamed region with original using mask
+    output = image.copy().astype(np.float32)
+    dreamed_float = dreamed_bgr.astype(np.float32)
+    output = mask_upscaled * dreamed_float + (1 - mask_upscaled) * output
+    output = output.astype(np.uint8)
+
+    # Visualization
+    if show_mask:
+        # Show mask overlay
+        vis_image = image.copy()
+        # Colorize mask based on body parts
+        colors = {
+            0: (0, 0, 0),       # background - black
+            1: (255, 0, 255),   # hair - magenta
+            2: (0, 255, 0),     # body-skin - green
+            3: (255, 255, 0),   # face-skin - cyan
+            4: (0, 0, 255),     # clothes - red
+            5: (255, 128, 0)    # others - orange
+        }
+
+        mask_colored = np.zeros((seg_mask.shape[0], seg_mask.shape[1], 3), dtype=np.uint8)
+        for part_id in body_parts:
+            mask_colored[seg_mask == part_id] = colors.get(part_id, (255, 255, 255))
+
+        mask_colored_upscaled = cv2.resize(mask_colored, (image.shape[1], image.shape[0]))
+        vis_image = cv2.addWeighted(vis_image, 0.7, mask_colored_upscaled, 0.3, 0)
+
+        return output, vis_image
+
+    return output, image
+
+
 # ----------------------------------------------------------------------------
 
 
 # Main loop function
 def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device, layer, static_w,
               label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror,
-              w_base=None, w_coarse=None, w_fine=None, truncation_psi=0.7, G2=None, mix_layer_indices=None):
+              w_base=None, w_coarse=None, w_fine=None, truncation_psi=0.7, G2=None, mix_layer_indices=None,
+              D_model=None, mp_selfie=None, body_parts_list=None, dream_iterations=5, dream_layers_list=None):
 
     if mode == 'v3':
         # Get the principal components, if we use mode 'v3'
@@ -1104,6 +1259,10 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
         elif mode == 'v7':
             latent = all_latents[c % len(all_latents)]
             simg, img = process_v7(G, G2, latent, mp_hands, img, label, truncation_psi, show_landmarks)
+        elif mode == 'v8':
+            simg, img = process_v8(D_model, mp_selfie, img, body_parts_list,
+                                   iterations=dream_iterations, layers=dream_layers_list,
+                                   show_mask=show_landmarks)
         else:
             raise ValueError(f"Mode {mode} not recognized.")
 
@@ -1185,7 +1344,10 @@ def main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, d
 @click.option('--face', 'face_tracking', type=bool, help='Use face tracking', default=False, show_default=True)
 @click.option('--body', 'body_tracking', type=bool, help='Use body tracking', default=False, show_default=True)
 # How to set the fake dlatent
-@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7']), required=True)
+@click.option('--mode', type=click.Choice(['v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8']), required=True)
+@click.option('--body-parts', type=str, help='Body parts to dream on for v8 mode (comma-separated: 0=bg,1=hair,2=body-skin,3=face-skin,4=clothes,5=others)', default='4', show_default=True)
+@click.option('--dream-iterations', type=int, help='Number of dream iterations for v8 mode (low for real-time)', default=5, show_default=True)
+@click.option('--dream-layers', type=str, help='Discriminator layers for v8 dreaming (comma-separated)', default='b16_conv0', show_default=True)
 @click.option('--mix-layers', type=str, help='Layers to mix for v6 mode (e.g., "coarse", "middle", "fine", "all", "0-4")', default='all', show_default=True)
 # TODO: intermediate layers?
 # Video options
@@ -1221,6 +1383,9 @@ def live_visual_reactive(
         face_tracking: bool,
         body_tracking: bool,
         mode: str,
+        body_parts: str,
+        dream_iterations: int,
+        dream_layers: str,
         mix_layers: str,
         display_height: Optional[int],
         anchor_latent_space: bool,
@@ -1262,6 +1427,23 @@ def live_visual_reactive(
     vgg16_features = setup_vgg16(device) if mode in ['v0', 'v1'] else None
     cam, height, width = setup_camera(demo_height, demo_width)
     mp_hands, mp_drawing, mp_drawing_styles = setup_mediapipe() if mode in ['v2', 'v3', 'v4', 'v5', 'v6', 'v7'] else (None, None, None)
+
+    # Setup discriminator and selfie segmentation for v8 mode
+    if mode == 'v8':
+        print('Loading discriminator for body dream masking...')
+        D = gen_utils.load_network('D', network_pkl, cfg, device)
+        from network_features import DiscriminatorFeatures
+        D_model = DiscriminatorFeatures(D).requires_grad_(False).to(device)
+        mp_selfie = setup_selfie_segmentation()
+        body_parts_list = [int(x.strip()) for x in body_parts.split(',')]
+        dream_layers_list = [x.strip() for x in dream_layers.split(',')]
+        print(f'Body parts to dream on: {body_parts_list}')
+        print(f'Dream layers: {dream_layers_list}')
+    else:
+        D_model = None
+        mp_selfie = None
+        body_parts_list = None
+        dream_layers_list = None
 
     display_height = G.img_resolution if display_height is None or display_height == 'max' else display_height
 
@@ -1331,7 +1513,8 @@ def live_visual_reactive(
 
     main_loop(G, vgg16_features, mp_hands, cam, height, width, display_height, device,
               layer, static_w, label, all_latents, const_input, const_input_interpolation, mode, verbose, show_landmarks, fps, mirror,
-              w_base, w_coarse, w_fine, truncation_psi, G2, mix_layer_indices)
+              w_base, w_coarse, w_fine, truncation_psi, G2, mix_layer_indices,
+              D_model, mp_selfie, body_parts_list, dream_iterations, dream_layers_list)
 
 
 # ----------------------------------------------------------------------------
